@@ -117,7 +117,6 @@ pub fn split_overlapping(
     }
     let mt = params.max_tile_x;
     let mode = params.detection_mode;
-    let threshold = params.dont_split_priorities as f64;
 
     // Accumulated offsets (tile units).
     let mut off: Vec<(i32, i32)> = islands.iter().map(base_offset).collect();
@@ -133,12 +132,9 @@ pub fn split_overlapping(
         let mut overlap_of: Vec<Vec<u32>> = vec![Vec::new(); n];
         for i in 0..n {
             for j in (i + 1)..n {
-                // dont_split_priorities: ignore overlaps between equal-
-                // priority pairs at or above the threshold.
-                if params.dont_split_priorities > 0
-                    && prio[i] >= threshold
-                    && (prio[i] - prio[j]).abs() < 1e-9
-                {
+                // dont_split_priorities: don't split islands that share the
+                // same align-priority value.
+                if params.dont_split_priorities && (prio[i] - prio[j]).abs() < 1e-9 {
                     continue;
                 }
                 if overlap_at(&islands[i], &islands[j], off[i], off[j], mode) {

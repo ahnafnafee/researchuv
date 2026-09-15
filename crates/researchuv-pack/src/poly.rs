@@ -208,6 +208,78 @@ pub fn polys_intersect(a: &[Vec2], b: &[Vec2]) -> bool {
     false
 }
 
+/// Is `p` inside the filled region of an island ring set (outer polygon
+/// minus holes)?
+pub fn point_in_filled(p: Vec2, outer: &[Vec2], holes: &[Vec<Vec2>], eps: f64) -> bool {
+    if !point_in_poly(p, outer, eps) {
+        return false;
+    }
+    for h in holes {
+        if point_in_poly(p, h, -eps) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Ring-set intersection: two islands (outer + holes each) overlap when any
+/// of their boundary rings cross, or one island has a boundary vertex inside
+/// the other's *filled* region (outer minus holes).
+pub fn ring_sets_intersect(
+    outer_a: &[Vec2],
+    holes_a: &[Vec<Vec2>],
+    outer_b: &[Vec2],
+    holes_b: &[Vec<Vec2>],
+) -> bool {
+    if outer_a.len() < 3 || outer_b.len() < 3 {
+        return false;
+    }
+    // Fast reject on outer bboxes.
+    if bbox_of(outer_a).intersect(&bbox_of(outer_b)).is_none() {
+        return false;
+    }
+    let rings_a: Vec<&[Vec2]> = std::iter::once(outer_a)
+        .chain(holes_a.iter().map(|h| h.as_slice()))
+        .collect();
+    let rings_b: Vec<&[Vec2]> = std::iter::once(outer_b)
+        .chain(holes_b.iter().map(|h| h.as_slice()))
+        .collect();
+    // Vertex containment against the filled regions (both directions).
+    for ring in &rings_a {
+        for &p in ring.iter() {
+            if point_in_filled(p, outer_b, holes_b, 0.0) {
+                return true;
+            }
+        }
+    }
+    for ring in &rings_b {
+        for &p in ring.iter() {
+            if point_in_filled(p, outer_a, holes_a, 0.0) {
+                return true;
+            }
+        }
+    }
+    // Edge crossings between every ring pair.
+    for ra in &rings_a {
+        for rb in &rings_b {
+            let na = ra.len();
+            let nb = rb.len();
+            for i in 0..na {
+                let p1 = ra[i];
+                let p2 = ra[(i + 1) % na];
+                for j in 0..nb {
+                    let q1 = rb[j];
+                    let q2 = rb[(j + 1) % nb];
+                    if segs_intersect(p1, p2, q1, q2) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Bounding-box overlap (`Exact` overlap test), with `eps` slack.
 pub fn boxes_overlap(a: &Box2, b: &Box2, eps: f64) -> bool {
     !(a.max.u + eps < b.min.u
@@ -217,10 +289,27 @@ pub fn boxes_overlap(a: &Box2, b: &Box2, eps: f64) -> bool {
 }
 
 /// Overlap test per the detection mode.
+///
+/// - `Disabled`: never overlaps.
+/// - `AnyPart`: the polygons intersect.
+/// - `Exact`: same bounding boxes (within `eps`) *and* identical areas —
+///   i.e. stacked copies of the same island (4.1.2 `labels.py`).
 pub fn overlap(a: &[Vec2], b: &[Vec2], mode: crate::params::OverlapDetectionMode, eps: f64) -> bool {
     match mode {
+        crate::params::OverlapDetectionMode::Disabled => false,
         crate::params::OverlapDetectionMode::AnyPart => polys_intersect(a, b),
-        crate::params::OverlapDetectionMode::Exact => boxes_overlap(&bbox_of(a), &bbox_of(b), eps),
+        crate::params::OverlapDetectionMode::Exact => {
+            let ba = bbox_of(a);
+            let bb = bbox_of(b);
+            let same_box = (ba.min.u - bb.min.u).abs() <= eps
+                && (ba.min.v - bb.min.v).abs() <= eps
+                && (ba.max.u - bb.max.u).abs() <= eps
+                && (ba.max.v - bb.max.v).abs() <= eps;
+            let aa = area(a);
+            let ab = area(b);
+            let same_area = (aa - ab).abs() <= eps * aa.max(ab).max(1e-30);
+            same_box && same_area
+        }
     }
 }
 
@@ -368,24 +457,48 @@ mod tests {
         let a = square(0.0, 0.0, 1.0);
         let b = square(0.5, 0.5, 1.0);
         assert!(overlap(&a, &b, M::AnyPart, 0.0));
-        assert!(overlap(&a, &b, M::Exact, 0.0));
-        // Bboxes overlap but polygons don't: two diagonal "diamonds" whose
-        // bbox ranges intersect on both axes but whose interiors are clear
-        // (L1 distance between centers 0.24 > 0.2 = sum of the radii).
-        let c = vec![
+        assert!(!overlap(&a, &b, M::Exact, 0.0), "offset copies are not Exact");
+        assert!(!overlap(&a, &b, M::Disabled, 0.0));
+        // Exact: two stacked copies of the same island.
+        let c = square(0.0, 0.0, 1.0);
+        assert!(overlap(&a, &c, M::Exact, 1e-9));
+        // AnyPart clear but Exact impossible: two diagonal diamonds whose
+        // bboxes overlap on both axes but whose interiors are clear.
+        let d = vec![
             Vec2::new(1.0, 0.9),
             Vec2::new(1.1, 1.0),
             Vec2::new(1.0, 1.1),
             Vec2::new(0.9, 1.0),
         ];
-        let d = vec![
+        let e = vec![
             Vec2::new(1.12, 1.02),
             Vec2::new(1.22, 1.12),
             Vec2::new(1.12, 1.22),
             Vec2::new(1.02, 1.12),
         ];
-        assert!(!overlap(&c, &d, M::AnyPart, 0.0));
-        assert!(overlap(&c, &d, M::Exact, 0.0));
+        assert!(!overlap(&d, &e, M::AnyPart, 0.0));
+        assert!(!overlap(&d, &e, M::Exact, 0.0));
+    }
+
+    #[test]
+    fn ring_sets_respect_holes() {
+        // An annulus (square with a square hole) and a small square that fits
+        // inside the hole: no overlap.
+        let outer = square(0.0, 0.0, 1.0);
+        let hole = vec![
+            Vec2::new(0.4, 0.4),
+            Vec2::new(0.6, 0.4),
+            Vec2::new(0.6, 0.6),
+            Vec2::new(0.4, 0.6),
+        ];
+        let inner_sq = square(0.45, 0.45, 0.1);
+        assert!(!ring_sets_intersect(&outer, &[hole.clone()], &inner_sq, &[]));
+        // The same small square overlapping the annulus body: overlap.
+        let touching = square(0.35, 0.35, 0.1);
+        assert!(ring_sets_intersect(&outer, &[hole.clone()], &touching, &[]));
+        // Point-in-filled: center of the hole is not filled.
+        assert!(!point_in_filled(Vec2::new(0.5, 0.5), &outer, &[hole.clone()], 0.0));
+        assert!(point_in_filled(Vec2::new(0.2, 0.5), &outer, &[hole], 0.0));
     }
 
     #[test]

@@ -139,26 +139,48 @@ pub fn orient_to_3d_rotation(island: &crate::island::Island, params: &OrientTo3d
         a[2][0] * cp + a[2][1] * sp,
     );
     let dom = dominant_axis(mx, my, mz);
-    // Which UV axis should the principal direction point at?
-    let target_axis = if dom == params.prim_3d_axis {
-        params.prim_uv_axis
-    } else if dom == params.sec_3d_axis {
-        params.sec_uv_axis
+    // Auto-correct the secondary 3-D axis away from the primary (the addon's
+    // `_update_orient_3d_axes`; the UV axes may repeat).
+    let prim3 = params.prim_3d_axis.unsigned();
+    let sec3 = if params.sec_3d_axis.unsigned() == prim3 {
+        next_axis(prim3)
     } else {
-        // Ambiguous (near-square 3-D): prim_sec_bias ≥ 50 prefers the primary
-        // pair, otherwise the secondary pair.
-        if params.prim_sec_bias >= 50.0 {
-            params.prim_uv_axis
+        params.sec_3d_axis.unsigned()
+    };
+    let prim_uv = params.prim_uv_axis;
+    let sec_uv = params.sec_uv_axis;
+    // Which UV axis should the principal direction point at?
+    let target_axis = if dom == prim3 {
+        prim_uv
+    } else if dom == sec3 {
+        sec_uv
+    } else {
+        // Ambiguous (near-square 3-D): prim_sec_bias ≥ 45 (of 0..90) prefers
+        // the primary pair, otherwise the secondary pair.
+        if params.prim_sec_bias >= 45.0 {
+            prim_uv
         } else {
-            params.sec_uv_axis
+            sec_uv
         }
     };
     let target = match target_axis {
-        UvpmAxis::X => 0.0,
+        UvpmAxis::None => return None, // no UV constraint
+        UvpmAxis::X | UvpmAxis::Z => 0.0,
         UvpmAxis::Y => std::f64::consts::FRAC_PI_2,
-        UvpmAxis::Z => 0.0,
+        UvpmAxis::NegX | UvpmAxis::NegZ => std::f64::consts::PI,
+        UvpmAxis::NegY => -std::f64::consts::FRAC_PI_2,
     };
     wrap_pi(target - principal_uv)
+}
+
+/// The next unsigned axis in X → Y → Z → X order (the addon's secondary-axis
+/// auto-correction cycle over the positive axes).
+fn next_axis(a: UvpmAxis) -> UvpmAxis {
+    match a {
+        UvpmAxis::X => UvpmAxis::Y,
+        UvpmAxis::Y => UvpmAxis::Z,
+        _ => UvpmAxis::X,
+    }
 }
 
 /// Principal direction angle of a 2×2 symmetric matrix with entries
@@ -210,21 +232,28 @@ pub fn match_3d_axis_rotation(
     space: CoordSpace,
 ) -> Option<f64> {
     let _ = space; // Local vs Global does not change the per-island rotation.
+    if axis == UvpmAxis::None {
+        return None; // match_3d_axis = None: don't match
+    }
     let verts3d = island.verts3d.as_ref()?;
     if verts3d.len() < 2 || verts3d.len() != island.verts.len() {
         return None;
     }
-    // Drop the matched 3-D axis → 2-D projection of the 3-D cloud.
+    // Drop the matched 3-D axis → 2-D projection of the 3-D cloud (a negative
+    // axis mirrors the projection; the principal-direction rotation is the
+    // same, and `flipping_enable` covers mirroring).
     let n = verts3d.len() as f64;
     let (cx, cy, cz) = (
         verts3d.iter().map(|p| p.x).sum::<f64>() / n,
         verts3d.iter().map(|p| p.y).sum::<f64>() / n,
         verts3d.iter().map(|p| p.z).sum::<f64>() / n,
     );
-    let comps = |p: &researchuv_math::Vec3| match axis {
+    let comps = |p: &researchuv_math::Vec3| match axis.unsigned() {
+        UvpmAxis::None => (0.0, 0.0),
         UvpmAxis::X => (p.y - cy, p.z - cz),
         UvpmAxis::Y => (p.x - cx, p.z - cz),
         UvpmAxis::Z => (p.x - cx, p.y - cy),
+        _ => (p.x - cx, p.y - cy),
     };
     let mut suu = 0.0f64;
     let mut suv = 0.0f64;

@@ -24,10 +24,11 @@ pub const SELECTED: IslandFlags = 8;
 ///
 /// The addon serializes per-face iparams into UV layers named
 /// `__uvpm4_v1_<script_name>`; known channels: `align_priority` (0..100, def 0),
-/// `normalize_multiplier` (0.0001..1000, def 1.0), `rotation_step` (0..180, def 0),
-/// `island_rot_step` (0..180, def 0), `split_offset_x` / `split_offset_y`
-/// (−10000..10000, def −10000), and the numbered groups (`lock_group`,
-/// `stack_group`, `track_group`, `norm_group`, def `MIN_VALUE + 1`).
+/// `normalize_multiplier` (10..1000 %, def 100), `rotation_step` (−1..180,
+/// def −1 = global), `island_rot_step` (−1..180, def −1 = global),
+/// `split_offset_x` / `split_offset_y` (−10000..10000, def −10000), and the
+/// numbered groups (`lock_group`, `stack_group`, `track_group`, `norm_group`,
+/// 0..1000, def 0 = 'N' unset, set values ≥ 1).
 pub const IPARAM_MAX: usize = 16;
 
 /// A mesh face contributing to an island (triangle in UV + optional 3D).
@@ -58,13 +59,16 @@ pub struct Face {
 
 impl Default for Face {
     /// A face with the addon's documented iparam channel defaults
-    /// (`align_priority` 0, `normalize_multiplier` 1.0, `rotation_step` /
-    /// `island_rot_step` 0, `split_offset_x/y` and the four numbered-group
-    /// channels at their unset sentinel `MIN_VALUE + 1` = −10000).
+    /// (`align_priority` 0, `normalize_multiplier` 100 %, `rotation_step` /
+    /// `island_rot_step` −1 (use the global), `split_offset_x/y` at the unset
+    /// sentinel −10000, and the four numbered-group channels at the unset
+    /// sentinel 0 = 'N').
     fn default() -> Self {
         use crate::params::iparam as c;
         let mut iparams = [0.0f64; IPARAM_MAX];
-        iparams[c::NORMALIZE_MULTIPLIER] = 1.0;
+        iparams[c::NORMALIZE_MULTIPLIER] = 100.0;
+        iparams[c::ROTATION_STEP] = c::ROT_STEP_UNSET;
+        iparams[c::ISLAND_ROT_STEP] = c::ROT_STEP_UNSET;
         iparams[c::SPLIT_OFFSET_X] = c::SPLIT_OFFSET_UNSET;
         iparams[c::SPLIT_OFFSET_Y] = c::SPLIT_OFFSET_UNSET;
         iparams[c::LOCK_GROUP] = c::GROUP_UNSET;
@@ -102,6 +106,9 @@ pub struct Island {
     pub faces: Vec<Face>,
     /// Outline polygon vertices, in order (CCW or CW; sign handled by area()).
     pub verts: Vec<Vec2>,
+    /// Hole polygons inside the outline (annulus-like islands; each hole is
+    /// subtracted from the filled area for overlap detection and area).
+    pub holes: Vec<Vec<Vec2>>,
     /// 3-D positions corresponding to `verts` (orient-to-3D).
     pub verts3d: Option<Vec<Vec3>>,
     /// Island flags (see `UvpmIslandFlags`); mutable, set by validation/placement.
@@ -119,9 +126,15 @@ impl Island {
     /// Build an island from a bare outline polygon (no faces — e.g. the
     /// chart outlines produced by the unwrap pipeline).
     pub fn from_polygon(verts: Vec<Vec2>) -> Self {
+        Self::from_polygon_with_holes(verts, Vec::new())
+    }
+
+    /// Build an island from an outline polygon plus interior hole loops.
+    pub fn from_polygon_with_holes(verts: Vec<Vec2>, holes: Vec<Vec<Vec2>>) -> Self {
         let mut isl = Self {
             faces: Vec::new(),
             verts,
+            holes,
             verts3d: None,
             flags: 0,
             is_static: false,
@@ -138,6 +151,7 @@ impl Island {
         let mut isl = Self {
             faces,
             verts: Vec::new(),
+            holes: Vec::new(),
             verts3d: None,
             flags: 0,
             is_static: false,
@@ -187,9 +201,15 @@ impl Island {
         }
         0.5 * a
     }
-    /// Absolute area of the outline.
+    /// Absolute area of the outline minus the holes.
     pub fn area(&self) -> f64 {
-        self.signed_area().abs()
+        let outer = self.signed_area().abs();
+        let holes: f64 = self
+            .holes
+            .iter()
+            .map(|h| crate::poly::signed_area(h).abs())
+            .sum();
+        (outer - holes).max(0.0)
     }
 
     /// Does this island carry `SELECTED`?
@@ -228,6 +248,11 @@ impl Island {
     /// Transform the outline by a placement (used to emit final UVs).
     pub fn transformed_outline(&self, t: &PlacedTransform) -> Vec<Vec2> {
         self.verts.iter().map(|p| t.apply(*p)).collect()
+    }
+
+    /// Transform the hole loops by a placement.
+    pub fn transformed_holes(&self, t: &PlacedTransform) -> Vec<Vec<Vec2>> {
+        self.holes.iter().map(|h| t.transform_poly(h)).collect()
     }
 }
 

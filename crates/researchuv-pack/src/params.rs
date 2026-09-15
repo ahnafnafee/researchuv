@@ -16,15 +16,19 @@ use researchuv_math::Vec2;
 /// | Index | Channel                  | Range        | Default      |
 /// |-------|--------------------------|--------------|--------------|
 /// | 0     | `align_priority`         | 0..100       | 0            |
-/// | 1     | `normalize_multiplier`   | 0.0001..1000 | 1.0          |
-/// | 2     | `rotation_step`          | 0..180       | 0            |
-/// | 3     | `island_rot_step`        | 0..180       | 0            |
+/// | 1     | `normalize_multiplier`   | 10..1000 (%) | 100          |
+/// | 2     | `rotation_step`          | −1..180      | −1 (global)  |
+/// | 3     | `island_rot_step`        | −1..180      | −1 (global)  |
 /// | 4     | `split_offset_x`         | −10000..10000| −10000       |
 /// | 5     | `split_offset_y`         | −10000..10000| −10000       |
-/// | 6     | `lock_group` (numbered)  | —            | MIN_VALUE+1  |
-/// | 7     | `stack_group` (numbered) | —            | MIN_VALUE+1  |
-/// | 8     | `track_group` (numbered) | —            | MIN_VALUE+1  |
-/// | 9     | `norm_group` (numbered)  | —            | MIN_VALUE+1  |
+/// | 6     | `lock_group` (numbered)  | 0..1000      | 0 (unset)    |
+/// | 7     | `stack_group` (numbered) | 0..1000      | 0 (unset)    |
+/// | 8     | `track_group` (numbered) | 0..1000      | 0 (unset)    |
+/// | 9     | `norm_group` (numbered)  | 0..1000      | 0 (unset)    |
+///
+/// (4.1.2 also carries *string* channels — `object_name`, `material_name`,
+/// `mesh_part`, `tdensity_show`, `tdensity_packing`, `g_scheme_{uuid}` —
+/// which this numeric model represents through the `Face` struct fields.)
 pub mod iparam {
     /// `align_priority` channel index.
     pub const ALIGN_PRIORITY: usize = 0;
@@ -47,10 +51,13 @@ pub mod iparam {
     /// `norm_group` (numbered groups) channel index.
     pub const NORM_GROUP: usize = 9;
 
+    /// "Not set" sentinel for the rotation-step channels (−1 = use the
+    /// global step).
+    pub const ROT_STEP_UNSET: f64 = -1.0;
     /// "Not set" sentinel for the split offsets (default −10000).
     pub const SPLIT_OFFSET_UNSET: f64 = -10_000.0;
-    /// "Not set" sentinel for numbered-group channels (`MIN_VALUE + 1`).
-    pub const GROUP_UNSET: f64 = -10_000.0;
+    /// "Not set" sentinel for numbered-group channels (0; a set group is ≥ 1).
+    pub const GROUP_UNSET: f64 = 0.0;
 }
 
 /// Align priority — the `align_priority` iparam channel (0..100, default 0).
@@ -87,10 +94,18 @@ impl AlignPriority {
     }
 }
 
-/// Engine return codes — `UvpmRetcode` (`types.py`).
+/// Engine return codes — `UvpmRetcode` (`types.py`, 4.1.2 values).
+///
+/// `code()` returns the wire value: `ABORTED = −2`, `NOT_SET = −1`,
+/// `SUCCESS = 0`, `FATAL_ERROR = 1`, `NO_SPACE = 2`, `CANCELLED = 3`,
+/// `INVALID_ISLANDS = 4`, `NO_SUITABLE_DEVICE = 5`, `NO_UVS = 6`,
+/// `INVALID_INPUT = 7`, `WARNING = 8`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[repr(u8)]
 pub enum UvpmRetcode {
+    /// Search aborted by the user (ESC during heuristic search).
+    Aborted = -2,
+    /// No result yet / not run.
+    NotSet = -1,
     /// No problem.
     #[default]
     Success = 0,
@@ -98,22 +113,33 @@ pub enum UvpmRetcode {
     NoSpace = 2,
     Cancelled = 3,
     InvalidIslands = 4,
-    NoUvs = 5,
-    InvalidInput = 6,
-    Warning = 7,
+    /// No GPU/engine device available (the CPU engine always has one; kept
+    /// for wire parity).
+    NoSuitableDevice = 5,
+    NoUvs = 6,
+    InvalidInput = 7,
+    Warning = 8,
 }
 
 impl UvpmRetcode {
-    pub const ALL: [UvpmRetcode; 8] = [
+    pub const ALL: [UvpmRetcode; 11] = [
+        UvpmRetcode::Aborted,
+        UvpmRetcode::NotSet,
         UvpmRetcode::Success,
         UvpmRetcode::FatalError,
         UvpmRetcode::NoSpace,
         UvpmRetcode::Cancelled,
         UvpmRetcode::InvalidIslands,
+        UvpmRetcode::NoSuitableDevice,
         UvpmRetcode::NoUvs,
         UvpmRetcode::InvalidInput,
         UvpmRetcode::Warning,
     ];
+
+    /// The wire value of this retcode.
+    pub fn code(self) -> i32 {
+        self as i32
+    }
 }
 
 /// Island rotation step (degrees) — `rotation_step` (1..180, def 90);
@@ -183,13 +209,17 @@ pub enum SimilarityMode {
     Topology,
 }
 
-/// Overlap detection mode — `UvpmOverlapDetectionMode`.
+/// Overlap detection mode — `UvpmOverlapDetectionMode`
+/// (`'0'` = disabled, `'1'` = any part, `'2'` = exact).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum OverlapDetectionMode {
-    /// Any part: polygon-based overlap of the islands' areas (default).
+    /// Do not detect overlaps.
+    Disabled,
+    /// Any part: polygon-based overlap of the islands' filled areas (default).
     #[default]
     AnyPart,
-    /// Exact: bounding-box overlap test.
+    /// Exact: islands overlap when their bounding boxes are the same *and*
+    /// their areas are identical.
     Exact,
 }
 
@@ -229,30 +259,52 @@ pub enum CoordSpace {
     Global,
 }
 
-/// 3-D axis — `UvpmAxis`.
+/// 3-D axis — `UvpmAxis`, a 7-value set including negative directions and
+/// `None` (`'0'` = none, `+X = 1, +Y = 2, +Z = 4, −X = 8, −Y = 16, −Z = 32`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum UvpmAxis {
-    /// X axis (default).
+    /// No axis (the default for `match_3d_axis`: don't match).
     #[default]
+    None,
     X,
     Y,
     Z,
+    NegX,
+    NegY,
+    NegZ,
 }
 
 impl UvpmAxis {
-    /// Unit vector of this axis.
+    /// Unit vector of this axis (`None` → the zero vector).
     pub fn vector(self) -> (f64, f64, f64) {
         match self {
+            UvpmAxis::None => (0.0, 0.0, 0.0),
             UvpmAxis::X => (1.0, 0.0, 0.0),
             UvpmAxis::Y => (0.0, 1.0, 0.0),
             UvpmAxis::Z => (0.0, 0.0, 1.0),
+            UvpmAxis::NegX => (-1.0, 0.0, 0.0),
+            UvpmAxis::NegY => (0.0, -1.0, 0.0),
+            UvpmAxis::NegZ => (0.0, 0.0, -1.0),
         }
     }
     pub fn from_index(i: usize) -> UvpmAxis {
         match i {
-            0 => UvpmAxis::X,
-            1 => UvpmAxis::Y,
-            _ => UvpmAxis::Z,
+            0 => UvpmAxis::None,
+            1 => UvpmAxis::X,
+            2 => UvpmAxis::Y,
+            3 => UvpmAxis::Z,
+            4 => UvpmAxis::NegX,
+            5 => UvpmAxis::NegY,
+            _ => UvpmAxis::NegZ,
+        }
+    }
+    /// The unsigned axis this direction lies on (X/Y/Z; `None` stays `None`).
+    pub fn unsigned(self) -> UvpmAxis {
+        match self {
+            UvpmAxis::NegX => UvpmAxis::X,
+            UvpmAxis::NegY => UvpmAxis::Y,
+            UvpmAxis::NegZ => UvpmAxis::Z,
+            other => other,
         }
     }
 }
@@ -301,22 +353,24 @@ pub enum GroupingMethod {
     Similarity,
 }
 
-/// Group layout mode — `GroupLayoutMode`.
+/// Group layout mode — `UvpmGroupLayoutMode`
+/// (`AUTOMATIC / MANUAL / AUTOMATIC_HORI / AUTOMATIC_VERT / TILE_GRID /
+/// TEXTURE_ATLAS`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum GroupLayoutMode {
     /// Automatic (default).
     #[default]
     Automatic,
-    /// Groups laid out side-by-side horizontally.
-    Horizontal,
-    /// Groups stacked vertically.
-    Vertical,
-    /// Groups arranged in a tile grid.
-    TileGrid,
-    /// Groups arranged as a texture atlas.
-    TextureAtlas,
     /// Manual placement (group order only).
     Manual,
+    /// Each group in a distinct tile row (fills bottom → top).
+    AutomaticHori,
+    /// Each group in a distinct tile column (fills left → right).
+    AutomaticVert,
+    /// Groups arranged in a tile grid.
+    TileGrid,
+    /// Groups arranged as a texture atlas (with subtile grids).
+    TextureAtlas,
 }
 
 /// Pack operation type — `PackOpType`.
@@ -343,28 +397,33 @@ pub enum AdvancedHeuristicMode {
     Enable,
 }
 
-/// Texel density unit — `TexelDensityUnit` (px per unit length).
+/// Texel density unit — `TexelDensityUnit`.
+///
+/// The stored value is always **px per meter**; the unit is the *display*
+/// unit, so `meters_per_display_unit()` converts a display value to the
+/// absolute value: `px_per_m = display_value / meters_per_display_unit`
+/// (100 px/cm → 10 000 px/m).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum TexelDensityUnit {
-    /// px per meter (default; multiplier 1,000,000).
+    /// px per meter (default; 1 m per display unit).
     #[default]
     PxPerMeter,
-    /// px per centimeter (multiplier 10,000).
+    /// px per centimeter (0.01 m per display unit).
     PxPerCentimeter,
-    /// px per inch (multiplier 2,540).
+    /// px per inch (0.0254 m per display unit).
     PxPerInch,
-    /// px per foot (multiplier 304.8).
+    /// px per foot (0.3048 m per display unit).
     PxPerFoot,
 }
 
 impl TexelDensityUnit {
-    /// px-per-unit multiplier (UV units assumed to be meters for PxPerMeter).
-    pub fn multiplier(self) -> f64 {
+    /// Meters per display unit — divide a display value by this to get px/m.
+    pub fn meters_per_display_unit(self) -> f64 {
         match self {
-            TexelDensityUnit::PxPerMeter => 1_000_000.0,
-            TexelDensityUnit::PxPerCentimeter => 10_000.0,
-            TexelDensityUnit::PxPerInch => 2_540.0,
-            TexelDensityUnit::PxPerFoot => 304.8,
+            TexelDensityUnit::PxPerMeter => 1.0,
+            TexelDensityUnit::PxPerCentimeter => 0.01,
+            TexelDensityUnit::PxPerInch => 0.0254,
+            TexelDensityUnit::PxPerFoot => 0.3048,
         }
     }
 }
@@ -392,27 +451,30 @@ pub enum UvpmFeatureCode {
 }
 
 /// Similarity parameters — `SimilarityParams` (the engine's C++ struct,
-/// populated by `UVPM4_MainProps.get_similar_params`).
+/// populated by `UVPM4_MainProps.get_similar_params`; 4.1.2 defaults).
 #[derive(Clone, Debug)]
 pub struct SimilarityParams {
     pub mode: SimilarityMode,
     /// Comparison precision (default `params.precision` = 500).
     pub precision: u32,
-    /// Similarity threshold, 0.0..0.75 (default 0.1).
+    /// Similarity threshold (0.0..1.0; default 0.1, no hard max in 4.1.2 —
+    /// 0.55 is used internally by track groups).
     pub threshold: f64,
-    /// Treat holes as dissimilar (default false).
+    /// Treat holes as dissimilar (default **true**).
     pub check_holes: bool,
     /// Rescale before comparing (default false).
     pub adjust_scale: bool,
-    /// Tolerance for non-uniform scaling, 0.0..1.0 (default 1.0).
+    /// Tolerance for non-uniform scaling, 0.0..1.0 (default **0.0**).
     pub non_uniform_scaling_tolerance: f64,
-    /// 3-D axis to match (default X).
+    /// Allow mirroring when matching (default false).
+    pub flipping_enable: bool,
+    /// 3-D axis to match (default `None`: don't match).
     pub match_3d_axis: UvpmAxis,
     /// Space for the 3-D axis match (default Local).
     pub match_3d_axis_space: CoordSpace,
     /// Snap vertices before comparing (default false).
     pub correct_vertices: bool,
-    /// Vertex correction threshold, 0.001..0.1 (default 0.01).
+    /// Vertex correction threshold, 0.001..0.05 (default 0.01).
     pub vertex_threshold: f64,
 }
 
@@ -422,10 +484,11 @@ impl Default for SimilarityParams {
             mode: SimilarityMode::default(),
             precision: 500,
             threshold: 0.1,
-            check_holes: false,
+            check_holes: true,
             adjust_scale: false,
-            non_uniform_scaling_tolerance: 1.0,
-            match_3d_axis: UvpmAxis::X,
+            non_uniform_scaling_tolerance: 0.0,
+            flipping_enable: false,
+            match_3d_axis: UvpmAxis::None,
             match_3d_axis_space: CoordSpace::Local,
             correct_vertices: false,
             vertex_threshold: 0.01,
@@ -464,8 +527,9 @@ pub struct SplitOverlapParams {
     pub detection_mode: OverlapDetectionMode,
     /// Max tiles along x (0 = unlimited).
     pub max_tile_x: u32,
-    /// Don't split islands with `align_priority` >= this value.
-    pub dont_split_priorities: u32,
+    /// Don't split islands that share the same `align_priority` value
+    /// (4.1.2: a boolean, not a threshold).
+    pub dont_split_priorities: bool,
 }
 
 /// Orient-to-3-D parameters — `UVPM4_OrientTo3dProps`.
@@ -476,13 +540,13 @@ pub struct OrientTo3dParams {
     pub prim_3d_axis: UvpmAxis,
     /// Primary UV axis it maps to (default Y).
     pub prim_uv_axis: UvpmAxis,
-    /// Secondary 3-D axis (default X).
+    /// Secondary 3-D axis (default X; auto-corrected away from the primary).
     pub sec_3d_axis: UvpmAxis,
-    /// Secondary UV axis (default X).
+    /// Secondary UV axis (default X; auto-corrected away from the primary).
     pub sec_uv_axis: UvpmAxis,
     /// Space (default Local).
     pub axes_space: CoordSpace,
-    /// Primary/secondary bias, 0..100 (default 80).
+    /// Primary/secondary bias, 0..90 (default 80).
     pub prim_sec_bias: f64,
 }
 
@@ -568,11 +632,15 @@ pub struct PackParams {
     pub rotation_enable: bool,
     /// Pre-rotation disable (packer does not pre-rotate islands).
     pub pre_rotation_disable: bool,
-    /// Allow island flipping (default true).
+    /// Allow island flipping (default **false** — 4.1.2 `flipping_enable`).
     pub flipping_enable: bool,
     /// Rotation step, degrees, 1..180 (default 90).
     pub rotation_step: u32,
-    /// Per-island rotation step override (0 = use global).
+    /// Assign a per-island rotation step from the iparam channel (default
+    /// false; the value to assign is `island_rot_step`).
+    pub island_rot_step_enable: bool,
+    /// Per-island rotation step value, 1..180 (default 90; applied when
+    /// `island_rot_step_enable` and the island's channel is unset, i.e. −1).
     pub island_rot_step: u32,
 
     // --- scale ---
@@ -623,8 +691,14 @@ pub struct PackParams {
     // --- heuristic ---
     /// Enable heuristic (time-limited) search (default false).
     pub heuristic_enable: bool,
-    /// Heuristic search time budget, seconds, 0..3600 (default 30.0).
+    /// Heuristic search time budget, seconds, 0..3600 (default **0** =
+    /// search continuously until the stagnation/max-wait stop; `< 0`
+    /// disables the search even when `heuristic_enable` is set — the
+    /// non-interactive guard).
     pub heuristic_search_time: f64,
+    /// Stop when no better result has been found for this many seconds,
+    /// 0..300 (default 0 = disabled).
+    pub heuristic_max_wait_time: f64,
     /// Advanced heuristic mode (default Auto).
     pub advanced_heuristic: AdvancedHeuristicMode,
     /// Allow mixed scales in heuristic search.
@@ -675,9 +749,10 @@ impl Default for PackParams {
             align_priority_enable: false,
             rotation_enable: true,
             pre_rotation_disable: false,
-            flipping_enable: true,
+            flipping_enable: false,
             rotation_step: 90,
-            island_rot_step: 0,
+            island_rot_step_enable: false,
+            island_rot_step: 90,
             scale_mode: ScaleMode::default(),
             scale: 1.0,
             normalize_scale: false,
@@ -698,7 +773,8 @@ impl Default for PackParams {
             lock_overlapping: false,
             overlap_detection_mode: OverlapDetectionMode::default(),
             heuristic_enable: false,
-            heuristic_search_time: 30.0,
+            heuristic_search_time: 0.0,
+            heuristic_max_wait_time: 0.0,
             advanced_heuristic: AdvancedHeuristicMode::default(),
             heuristic_allow_mixed_scales: false,
             arrange_non_packed: true,
@@ -767,17 +843,18 @@ impl PackParams {
         }
     }
 
-    /// The rotation candidates (radians) for an island with optional
-    /// per-island rotation step override.
-    pub fn rotation_candidates(&self, island_step_override: u32) -> Vec<f64> {
+    /// The rotation candidates (radians) for an island. `island_step_override`
+    /// is the island's `island_rot_step` channel value in degrees, or −1 when
+    /// unset (use the global step). The per-island step only applies when
+    /// `island_rot_step_enable` is set.
+    pub fn rotation_candidates(&self, island_step_override_deg: i32) -> Vec<f64> {
         if !self.rotation_enable {
             return vec![0.0];
         }
-        let step = if island_step_override > 0 {
-            island_step_override
-        } else {
-            self.island_rot_step.max(self.rotation_step)
-        };
+        let mut step = self.island_rot_step.max(self.rotation_step);
+        if self.island_rot_step_enable && island_step_override_deg >= 0 {
+            step = island_step_override_deg as u32;
+        }
         RotationStep { degrees: step }.angles()
     }
 
@@ -833,8 +910,10 @@ mod tests {
         assert_eq!(p.extra_pixel_margin_to_others, 0);
         assert_eq!(p.pixel_margin_tex_size, 1024);
         assert!(p.rotation_enable);
-        assert!(p.flipping_enable);
+        assert!(!p.flipping_enable, "4.1.2 flipping default is off");
         assert_eq!(p.rotation_step, 90);
+        assert!(!p.island_rot_step_enable);
+        assert_eq!(p.island_rot_step, 90);
         assert_eq!(p.scale_mode, ScaleMode::MaxScale);
         assert!(p.fully_inside);
         assert_eq!(p.pack_strategy, PackStrategy::Automatic);
@@ -842,11 +921,15 @@ mod tests {
         assert_eq!(p.tiles_in_row, 10);
         assert!(!p.lock_overlapping);
         assert!(!p.heuristic_enable);
-        assert!((p.heuristic_search_time - 30.0).abs() < 1e-12);
+        assert_eq!(p.heuristic_search_time, 0.0, "0 = continuous search");
+        assert_eq!(p.heuristic_max_wait_time, 0.0);
         assert!(p.arrange_non_packed);
         assert_eq!(p.similarity.threshold, 0.1);
+        assert!(p.similarity.check_holes, "4.1.2 check_holes default is on");
+        assert_eq!(p.similarity.match_3d_axis, UvpmAxis::None);
+        assert!(!p.similarity.flipping_enable);
         assert_eq!(p.orient_to_3d.prim_3d_axis, UvpmAxis::Z);
-        assert!((p.orient_to_3d.prim_sec_bias - 80.0).abs() < 1e-12);
+        assert_eq!(p.orient_to_3d.prim_sec_bias, 80.0);
         assert_eq!(p.grouping.layout, GroupLayoutMode::Automatic);
         assert!(!p.grouping.groups_together);
     }
@@ -857,18 +940,26 @@ mod tests {
             rotation_step: 90,
             ..PackParams::default()
         };
-        let a = p.rotation_candidates(0);
+        let a = p.rotation_candidates(-1);
         assert_eq!(a.len(), 4); // 0, 90, 180, 270
         let p2 = PackParams {
             rotation_enable: false,
             ..PackParams::default()
         };
-        assert_eq!(p2.rotation_candidates(0), vec![0.0]);
+        assert_eq!(p2.rotation_candidates(-1), vec![0.0]);
         let p3 = PackParams {
             rotation_step: 180,
             ..PackParams::default()
         };
-        assert_eq!(p3.rotation_candidates(0).len(), 2);
+        assert_eq!(p3.rotation_candidates(-1).len(), 2);
+        // Per-island step applies only when enabled and the channel is set.
+        let p4 = PackParams {
+            island_rot_step_enable: true,
+            ..PackParams::default()
+        };
+        assert_eq!(p4.rotation_candidates(45).len(), 8);
+        let p5 = PackParams::default();
+        assert_eq!(p5.rotation_candidates(45).len(), 4, "disabled: global only");
     }
 
     #[test]
@@ -894,17 +985,34 @@ mod tests {
 
     #[test]
     fn tdensity_units() {
-        assert!((TexelDensityUnit::PxPerMeter.multiplier() - 1_000_000.0).abs() < 1e-9);
-        assert!((TexelDensityUnit::PxPerCentimeter.multiplier() - 10_000.0).abs() < 1e-9);
-        assert!((TexelDensityUnit::PxPerInch.multiplier() - 2_540.0).abs() < 1e-9);
-        assert!((TexelDensityUnit::PxPerFoot.multiplier() - 304.8).abs() < 1e-9);
+        // Meters per display unit — display values divide by this to get px/m.
+        assert!((TexelDensityUnit::PxPerMeter.meters_per_display_unit() - 1.0).abs() < 1e-12);
+        assert!((TexelDensityUnit::PxPerCentimeter.meters_per_display_unit() - 0.01).abs() < 1e-12);
+        assert!((TexelDensityUnit::PxPerInch.meters_per_display_unit() - 0.0254).abs() < 1e-12);
+        assert!((TexelDensityUnit::PxPerFoot.meters_per_display_unit() - 0.3048).abs() < 1e-12);
+        // 100 px/cm → 10 000 px/m.
+        let d = 100.0 / TexelDensityUnit::PxPerCentimeter.meters_per_display_unit();
+        assert!((d - 10_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn axis_model_covers_all_seven_directions() {
+        assert_eq!(UvpmAxis::default(), UvpmAxis::None);
+        assert_eq!(UvpmAxis::None.vector(), (0.0, 0.0, 0.0));
+        assert_eq!(UvpmAxis::NegY.vector(), (0.0, -1.0, 0.0));
+        assert_eq!(UvpmAxis::NegZ.unsigned(), UvpmAxis::Z);
     }
 
     #[test]
     fn retcode_values() {
-        assert_eq!(UvpmRetcode::Success as u8, 0);
-        assert_eq!(UvpmRetcode::NoSpace as u8, 2);
-        assert_eq!(UvpmRetcode::InvalidIslands as u8, 4);
-        assert_eq!(UvpmRetcode::Warning as u8, 7);
+        assert_eq!(UvpmRetcode::Success.code(), 0);
+        assert_eq!(UvpmRetcode::NoSpace.code(), 2);
+        assert_eq!(UvpmRetcode::InvalidIslands.code(), 4);
+        assert_eq!(UvpmRetcode::NoSuitableDevice.code(), 5);
+        assert_eq!(UvpmRetcode::NoUvs.code(), 6);
+        assert_eq!(UvpmRetcode::InvalidInput.code(), 7);
+        assert_eq!(UvpmRetcode::Warning.code(), 8);
+        assert_eq!(UvpmRetcode::Aborted.code(), -2);
+        assert_eq!(UvpmRetcode::NotSet.code(), -1);
     }
 }

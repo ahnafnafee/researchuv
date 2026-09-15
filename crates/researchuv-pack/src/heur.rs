@@ -47,13 +47,19 @@ pub struct HeuristicStats {
 }
 
 /// Is the advanced heuristic active for this configuration and island count?
+///
+/// The search itself requires `heuristic_enable` and a non-negative
+/// `heuristic_search_time` (4.1.2 disables the search for negative budgets —
+/// the non-interactive guard; 0 = continuous).
 pub fn advanced_heuristic_active(params: &PackParams, island_count: usize) -> bool {
-    if !params.heuristic_enable {
+    if !params.heuristic_enable || params.heuristic_search_time < 0.0 {
         return false;
     }
     match params.advanced_heuristic {
         AdvancedHeuristicMode::Enable => true,
         AdvancedHeuristicMode::Disable => false,
+        // The engine decides internally; this CPU analog engages the deeper
+        // sampler once there are enough islands to reshuffle.
         AdvancedHeuristicMode::Auto => island_count >= AUTO_THRESHOLD,
     }
 }
@@ -68,9 +74,13 @@ pub fn packing_score(placed: &[Placed], target: &Box2, params: &PackParams) -> f
         .sum()
 }
 
-/// Improve `placed` (an initial solution from the base placement pass) over a
-/// time budget (the engine's `heuristic_search_time` seconds; a budget of 0
-/// runs exactly one improvement pass).
+/// Improve `placed` (an initial solution from the base placement pass).
+///
+/// Budget semantics (4.1.2): `heuristic_search_time > 0` caps the search at
+/// that many seconds; `0` searches continuously until a stop condition
+/// (stagnation or `heuristic_max_wait_time` seconds without improvement).
+/// `heuristic_max_wait_time > 0` stops the search once no better result has
+/// been found for that long, under either budget mode.
 ///
 /// Only islands that are *not* static are moved; static islands stay put.
 pub fn heuristic_refine(
@@ -81,7 +91,9 @@ pub fn heuristic_refine(
     rng: &mut SplitMix64,
 ) -> HeuristicStats {
     let start = Instant::now();
+    let mut last_improvement = Instant::now();
     let budget = params.heuristic_search_time.max(0.0);
+    let max_wait = params.heuristic_max_wait_time.max(0.0);
     let n = placed.len().min(islands.len());
     if n < 2 {
         let mut s = HeuristicStats::default();
@@ -91,18 +103,16 @@ pub fn heuristic_refine(
     let strategy = effective_strategy(params);
     let mut stats = HeuristicStats::default();
     let mut score = packing_score(placed, target, params);
-    let rotations = params.rotation_candidates(0);
-    let mut pass = 0u32;
+    let rotations = params.rotation_candidates(-1);
     let mut stagnant = 0u32;
 
     loop {
         if budget > 0.0 && start.elapsed().as_secs_f64() >= budget {
             break;
         }
-        if budget == 0.0 && pass > 0 {
-            break; // zero budget: exactly one pass
+        if max_wait > 0.0 && last_improvement.elapsed().as_secs_f64() >= max_wait {
+            break;
         }
-        pass += 1;
         let mut moved = 0usize;
 
         // Seeded random scan order.
@@ -111,6 +121,9 @@ pub fn heuristic_refine(
 
         for &i in order.iter() {
             if budget > 0.0 && start.elapsed().as_secs_f64() >= budget {
+                break;
+            }
+            if max_wait > 0.0 && last_improvement.elapsed().as_secs_f64() >= max_wait {
                 break;
             }
             let cur = placed[i].clone();
@@ -203,14 +216,15 @@ pub fn heuristic_refine(
                     score += new_island_score - cur_island_score;
                     stats.relocations += 1;
                     moved += 1;
+                    last_improvement = Instant::now();
                     break; // island moved; sample its new neighborhood next pass
                 }
             }
         }
 
-        // Stagnation exit: the budget is a wall-time ceiling, not a target.
-        // Two consecutive passes with no accepting move means the layout is
-        // a local optimum under this sampler — stop rather than spin.
+        // Stagnation exit: with a positive budget this is the wall-time
+        // ceiling's complement — a local optimum under this sampler; with a
+        // continuous (0) budget and no max-wait it is the only stop.
         if moved == 0 {
             stagnant += 1;
             if stagnant >= 2 {

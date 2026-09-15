@@ -4,20 +4,22 @@
 //! Order of operations (mirroring the engine's pack scenario + the addon's
 //! `spipeline` flow):
 //!
-//! 1. Effective target box (non-square ratio applied).
-//! 2. Texel density (`set_tdensity`): per-island scale policy (pre-scale).
-//! 3. Scale normalization (`normalize_scale` + `island_normalize_multiplier`).
-//! 4. Grouping (`GroupingMethod` → `GroupResult`, per-group regions).
-//! 5. Similarity: `split_by_similarity` + `align_similar` pre-rotations.
-//! 6. Placement: static/"others" islands first (at their current position),
+//! 1. Max-dimension clamp (`MAX_ISLAND_DIM_ALLOWED` = 4.0) on non-fixed-scale
+//!    islands.
+//! 2. Effective target box (non-square ratio applied).
+//! 3. Texel density (`set_tdensity`): per-island scale policy (pre-scale).
+//! 4. Scale normalization (`normalize_scale` + `island_normalize_multiplier`).
+//! 5. Grouping (`GroupingMethod` → `GroupResult`, per-group regions).
+//! 6. Similarity: `split_by_similarity` + `align_similar` pre-rotations.
+//! 7. Placement: static/"others" islands first (at their current position),
 //!    then the movable islands in (group id, −max-extent) order via
 //!    [`crate::place::find_best_placement`], each inside its group's region
 //!    when `groups_together` is on.
-//! 7. Heuristic refinement (time-budgeted, when enabled + active).
-//! 8. Pixel-perfect alignment (Corner/Center snap → `ALIGNED` flag).
-//! 9. Validation (overlap / outside-target / self-intersection / holes →
-//!    `UvpmRetcode` + island flags).
-//! 10. Split-overlap (integer tile offsets for leftover overlaps).
+//! 8. Heuristic refinement (time-budgeted, when enabled + active).
+//! 9. Pixel-perfect alignment (Corner/Center snap → `ALIGNED` flag).
+//! 10. Validation (overlap / outside-target / self-intersection / holes →
+//!     `UvpmRetcode` + island flags), on ring sets (outlines + holes).
+//! 11. Split-overlap (integer tile offsets for leftover overlaps).
 //!
 //! The result contract is per-island `PlacedTransform` + flags + retcode —
 //! the engine's `CONTAINS_TRANSFORM` / `CONTAINS_FLAGS` / `CONTAINS_VERTICES`
@@ -31,7 +33,9 @@ use crate::box2::Box2;
 use crate::groups::{assign_groups, GroupResult};
 use crate::heur::{advanced_heuristic_active, heuristic_refine, HeuristicStats};
 use crate::island::{Island, PlacedTransform, OVERLAPS, OUTSIDE_TARGET_BOX, ALIGNED};
-use crate::params::{iparam, CoordSpace, GroupingMethod, PackOpType, PackParams, UvpmRetcode};
+use crate::params::{
+    iparam, CoordSpace, GroupingMethod, PackOpType, PackParams, ScaleMode, UvpmRetcode,
+};
 use crate::place::{
     arrange_non_packed, find_best_placement, local_min_corner, rotated_size, Placed,
 };
@@ -41,6 +45,10 @@ use crate::split;
 use crate::tdensity::{set_tdensity, TexelDensityPolicy};
 use crate::validate;
 use researchuv_math::Vec2;
+
+/// `MAX_ISLAND_DIM_ALLOWED` — non-fixed-scale islands larger than this (UV
+/// units) are pre-scaled down before packing (the addon's input clamp).
+pub const MAX_ISLAND_DIM_ALLOWED: f64 = 4.0;
 
 /// The result of a pack run — the per-island transform + flags + retcode
 /// contract of the engine's `EXECUTE_SCENARIO` reply.
@@ -112,24 +120,54 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
     let n = islands.len();
     let mut rng = SplitMix64::new(params.seed);
 
-    // --- 1: texel density (per-island scale policy, applied before packing) ---
-    let extents: Vec<f64> = islands.iter().map(|i| i.bbox.max_extent()).collect();
+    // --- 1: max-dimension clamp (MAX_ISLAND_DIM_ALLOWED) ---
+    // Non-fixed-scale islands larger than the engine's allowed maximum are
+    // pre-scaled down before packing. The clamp is folded into the per-island
+    // pre-scale (not the input geometry), so the returned transforms keep
+    // mapping each island's raw UV space.
+    let clamp: Vec<f64> = islands
+        .iter()
+        .map(|isl| {
+            let ext = isl.bbox.max_extent();
+            if params.scale_mode == ScaleMode::FixedScale
+                || params.scale_mode == ScaleMode::FixedScaleMaxMargin
+                || ext <= MAX_ISLAND_DIM_ALLOWED
+            {
+                1.0
+            } else {
+                MAX_ISLAND_DIM_ALLOWED / ext
+            }
+        })
+        .collect();
+
+    // --- 2: texel density (per-island scale policy, applied before packing) ---
+    let extents: Vec<f64> = islands
+        .iter()
+        .zip(clamp.iter())
+        .map(|(i, &k)| i.bbox.max_extent() * k)
+        .collect();
     let tex_size = params.pixel_margin_tex_size.max(1) as f32;
     let tdensity: Vec<TexelDensityPolicy> = if params.tdensity.enable {
         set_tdensity(&params.tdensity, &extents, tex_size, 1.0)
     } else {
         vec![TexelDensityPolicy { scale: 1.0, density: 0.0 }; n]
     };
-    let mut pre_scale: Vec<f64> = tdensity.iter().map(|p| p.scale.max(1e-30)).collect();
+    let mut pre_scale: Vec<f64> = clamp
+        .iter()
+        .zip(tdensity.iter())
+        .map(|(&k, p)| (k * p.scale.max(1e-30)).max(1e-30))
+        .collect();
 
-    // --- 2: scale normalization (normalize_scale + per-island multiplier) ---
+    // --- 3: scale normalization (normalize_scale + per-island multiplier) ---
     if params.normalize_scale {
         let global_max = extents.iter().cloned().fold(1e-30, f64::max);
         let local = params.normalize_space == CoordSpace::Local;
         for i in 0..n {
             let ref_extent = if local { extents[i] } else { global_max };
+            // The channel stores a percent (10..1000, default 100): 100 = ×1.
             let mult = islands[i]
                 .iparam_channel(iparam::NORMALIZE_MULTIPLIER)
+                .map(|v| (v / 100.0).clamp(0.1, 10.0))
                 .unwrap_or(params.island_normalize_multiplier);
             if ref_extent > 0.0 {
                 pre_scale[i] *= mult / ref_extent;
@@ -197,7 +235,9 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
 
     // --- 6: placement order ---
     // Fixed (static / "others") islands are placed first, at their current
-    // position with the identity transform.
+    // position with the identity transform. `RepackWithOthers` moves the
+    // selected islands plus the unselected ones that overlap the op target;
+    // unselected islands elsewhere keep their position (4.1.2 semantics).
     let pack_op = params.pack_op;
     let is_movable = |i: usize| {
         let isl = &islands[i];
@@ -205,7 +245,10 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
             return false;
         }
         match pack_op {
-            PackOpType::Pack | PackOpType::RepackWithOthers => true,
+            PackOpType::Pack => true,
+            PackOpType::RepackWithOthers => {
+                isl.is_selected() || isl.bbox.intersect(&target).is_some()
+            }
             PackOpType::PackToOthers => isl.is_selected(),
         }
     };
@@ -337,12 +380,16 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
             None => islands[i].verts.clone(),
         })
         .collect();
-    let mut validation = validate::validate_islands(
-        islands,
-        &outlines,
-        &target,
-        params,
-    );
+    let placed_holes: Vec<Vec<Vec<Vec2>>> = placed
+        .iter()
+        .enumerate()
+        .map(|(i, t)| match t {
+            Some(t) => islands[i].transformed_holes(t),
+            None => islands[i].holes.clone(),
+        })
+        .collect();
+    let mut validation =
+        validate::validate_islands(islands, &outlines, &placed_holes, &target, params);
     // Non-packed islands (arranged outside the target) are exempt from the
     // OUTSIDE_TARGET_BOX error.
     if !non_packed.is_empty() {

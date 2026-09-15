@@ -1,13 +1,14 @@
 //! # researchuv-pack — UVPackmaster-grade island packing engine
 //!
-//! A Rust clone of **UVPackmaster 4's packing engine** (`uvpm.exe`): the island
-//! data model, the full documented option surface (from the GPL addon's
-//! `UVPM4_MainProps` / `Labels` / `types` / `island_params` specs), and the
-//! packing algorithms (placement search, scale modes, margins, rotation/flip,
-//! overlap detection, similarity, texel density, pixel-perfect alignment,
-//! grouping, numbered groups, split-overlap, heuristic search).
+//! A Rust clone of **UVPackmaster 4.1.2's packing engine** (`uvpm.exe`): the
+//! island data model, the full documented option surface (from the GPL
+//! addon's `UVPM4_MainProps` / `Labels` / `types` / `island_params` specs),
+//! and the packing algorithms (placement search, scale modes, margins,
+//! rotation/flip, overlap detection, similarity, texel density,
+//! pixel-perfect alignment, grouping, numbered groups, split-overlap,
+//! heuristic search).
 //!
-//! Evidence base (all read from the installed `uvpm.exe` + addon on this machine):
+//! Evidence base (the 4.1.2 addon sources + the engine binary):
 //!
 //! - **Engine string cluster** @ `~2.89 MB` of `uvpm.exe`: `PackStrategy`,
 //!   `SimilarityParams`, `PackStrategyParams`, `PackParams`, `PackResult`,

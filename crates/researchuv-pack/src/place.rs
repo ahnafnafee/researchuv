@@ -17,7 +17,7 @@
 
 use crate::box2::{Box2, BoxCorner};
 use crate::island::{Island, PlacedTransform};
-use crate::params::{PackParams, PackStrategy, ScaleMode};
+use crate::params::{iparam, PackParams, PackStrategy, ScaleMode};
 use crate::rng::SplitMix64;
 use researchuv_math::Vec2;
 
@@ -251,7 +251,12 @@ pub fn find_best_placement(
     }
 
     let strategy = effective_strategy(params);
-    let rotations = params.rotation_candidates(0);
+    // Per-island rotation step from the iparam channel (−1 = use the global).
+    let island_step = island
+        .iparam_channel(iparam::ISLAND_ROT_STEP)
+        .map(|v| v as i32)
+        .unwrap_or(-1);
+    let rotations = params.rotation_candidates(island_step);
     let mut flips = vec![false];
     if params.flipping_enable {
         flips.push(true);
@@ -501,8 +506,16 @@ pub fn effective_strategy(params: &PackParams) -> PackStrategy {
     }
 }
 
-/// Arrange islands that did not fit (the `arrange_non_packed` option): place
-/// them outside the target box, stacked along +v at the target's left edge.
+/// Handle margin between the target and the non-packed island line
+/// (the addon's `HANDLE_MARGIN`).
+pub const HANDLE_MARGIN: f64 = 0.05;
+
+/// The u-coordinate at which the non-packed line wraps (the addon's +5.0).
+pub const ARRANGE_WRAP_U: f64 = 5.0;
+
+/// Arrange islands that did not fit (the `arrange_non_packed` option): a line
+/// of islands above the target box, `HANDLE_MARGIN` above its top edge,
+/// advancing along +u and wrapping at `target.min.u + ARRANGE_WRAP_U`.
 pub fn arrange_non_packed(
     island: &Island,
     placed: &[Placed],
@@ -518,12 +531,33 @@ pub fn arrange_non_packed(
         return None;
     }
     let gap = params.island_gap(w0, h0);
-    let x = target.min.u;
-    let mut y = target.max.v + gap;
-    for p in placed {
-        if p.box_.min.u <= x + 1e-9 && p.box_.max.u >= x + w0 - 1e-9 {
-            y = y.max(p.box_.max.v + gap);
+    let y = target.max.v + HANDLE_MARGIN;
+    // Scan the non-packed line above the target: the first free slot that
+    // fits the island, advancing past islands in the way.
+    let mut x = target.min.u;
+    let wrap = target.min.u + ARRANGE_WRAP_U;
+    // Occupied intervals on the line: the placed boxes that reach into it.
+    let mut intervals: Vec<(f64, f64)> = placed
+        .iter()
+        .filter(|p| p.box_.min.v <= y + h0 + gap && p.box_.max.v >= y - gap)
+        .map(|p| (p.box_.min.u - gap, p.box_.max.u + gap))
+        .collect();
+    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (lo, hi) in intervals {
+        if x >= lo && x < hi {
+            x = hi;
         }
+    }
+    if x + w0 > wrap && x > target.min.u {
+        // Wrap: start a second row above the first.
+        let y = y + h0 + gap;
+        let b = Box2::new(Vec2::new(target.min.u, y), Vec2::new(target.min.u + w0, y + h0));
+        let (lmin_u, lmin_v) = local_min_corner(island, 0.0, false, 1.0);
+        return Some(Placed {
+            island_index: 0,
+            transform: PlacedTransform::from_parts(0.0, false, 1.0, target.min.u - lmin_u, y - lmin_v, b),
+            box_: b,
+        });
     }
     let b = Box2::new(Vec2::new(x, y), Vec2::new(x + w0, y + h0));
     let (lmin_u, lmin_v) = local_min_corner(island, 0.0, false, 1.0);

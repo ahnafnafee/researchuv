@@ -41,11 +41,13 @@ impl ValidationReport {
     }
 }
 
-/// Validate a placement of `islands` (with their placed outlines in `placed`)
-/// against `target`. Returns the report and stamps `island.flags`.
+/// Validate a placement of `islands` (with their placed outlines in `placed`
+/// and placed hole loops in `placed_holes`) against `target`. Returns the
+/// report and stamps `island.flags`.
 pub fn validate_islands(
     islands: &mut [Island],
     placed: &[Vec<Vec2>],
+    placed_holes: &[Vec<Vec<Vec2>>],
     target: &Box2,
     params: &PackParams,
 ) -> ValidationReport {
@@ -64,7 +66,7 @@ pub fn validate_islands(
         if poly::self_intersects(p) {
             rep.self_intersecting.push(i as u32);
         }
-        if params.similarity.check_holes && poly::has_holes(p) {
+        if params.similarity.check_holes && placed_holes[i].is_empty() && poly::has_holes(p) {
             rep.with_holes.push(i as u32);
         }
     }
@@ -81,13 +83,16 @@ pub fn validate_islands(
         }
     }
 
-    // Pairwise overlap.
+    // Pairwise overlap (filled regions: outer minus holes).
     for i in 0..n {
         for j in (i + 1)..n {
-            let a = &placed[i];
-            let b = &placed[j];
             let mode = params.overlap_detection_mode;
-            if poly::overlap(a, b, mode, 1e-9) {
+            if mode == crate::params::OverlapDetectionMode::Disabled {
+                continue;
+            }
+            if poly::ring_sets_intersect(&placed[i], &placed_holes[i], &placed[j], &placed_holes[j])
+                || poly::overlap(&placed[i], &placed[j], mode, 1e-9)
+            {
                 rep.overlapping.push(i as u32);
                 rep.overlapping.push(j as u32);
                 islands[i].flags |= OVERLAPS;
@@ -141,8 +146,9 @@ mod tests {
     fn no_problems() {
         let mut isls = vec![sq(0.0, 0.0, 0.4), sq(0.6, 0.0, 0.4)];
         let placed: Vec<Vec<Vec2>> = isls.iter().map(|i| i.verts.clone()).collect();
+        let holes: Vec<Vec<Vec<Vec2>>> = isls.iter().map(|i| i.holes.clone()).collect();
         let p = PackParams::default();
-        let r = validate_islands(&mut isls, &placed, &Box2::unit(), &p);
+        let r = validate_islands(&mut isls, &placed, &holes, &Box2::unit(), &p);
         assert_eq!(r.retcode, UvpmRetcode::Success);
         assert!(r.overlapping.is_empty());
         assert!(r.outside.is_empty());
@@ -152,8 +158,9 @@ mod tests {
     fn overlap_detected() {
         let mut isls = vec![sq(0.0, 0.0, 0.6), sq(0.4, 0.0, 0.6)];
         let placed: Vec<Vec<Vec2>> = isls.iter().map(|i| i.verts.clone()).collect();
+        let holes: Vec<Vec<Vec<Vec2>>> = isls.iter().map(|i| i.holes.clone()).collect();
         let p = PackParams::default();
-        let r = validate_islands(&mut isls, &placed, &Box2::unit(), &p);
+        let r = validate_islands(&mut isls, &placed, &holes, &Box2::unit(), &p);
         assert_eq!(r.retcode, UvpmRetcode::Success);
         assert_eq!(r.overlapping, vec![0u32, 1]);
         assert!(isls[0].overlaps_flag());
@@ -164,8 +171,9 @@ mod tests {
     fn outside_detected() {
         let mut isls = vec![sq(-0.3, 0.0, 0.4), sq(0.0, 0.5, 0.4)];
         let placed: Vec<Vec<Vec2>> = isls.iter().map(|i| i.verts.clone()).collect();
+        let holes: Vec<Vec<Vec<Vec2>>> = isls.iter().map(|i| i.holes.clone()).collect();
         let p = PackParams::default();
-        let r = validate_islands(&mut isls, &placed, &Box2::unit(), &p);
+        let r = validate_islands(&mut isls, &placed, &holes, &Box2::unit(), &p);
         assert_eq!(r.retcode, UvpmRetcode::NoSpace);
         assert_eq!(r.outside, vec![0u32]);
         assert!(isls[0].outside_flag());
@@ -181,8 +189,9 @@ mod tests {
         ]);
         let mut isls = vec![bowtie.clone()];
         let placed: Vec<Vec<Vec2>> = isls.iter().map(|i| i.verts.clone()).collect();
+        let holes: Vec<Vec<Vec<Vec2>>> = isls.iter().map(|i| i.holes.clone()).collect();
         let p = PackParams::default();
-        let r = validate_islands(&mut isls, &placed, &Box2::unit(), &p);
+        let r = validate_islands(&mut isls, &placed, &holes, &Box2::unit(), &p);
         assert_eq!(r.retcode, UvpmRetcode::InvalidIslands);
         assert_eq!(r.self_intersecting, vec![0u32]);
     }

@@ -232,7 +232,7 @@ pub fn layout_group_regions(
     }
 
     let regions = match layout {
-        GroupLayoutMode::Horizontal | GroupLayoutMode::Automatic => {
+        GroupLayoutMode::AutomaticHori | GroupLayoutMode::Automatic => {
             // Area-proportional columns.
             let sum_sqrt: f64 = areas.iter().map(|a| a.sqrt()).sum();
             let mut widths: Vec<f64> = areas
@@ -258,7 +258,7 @@ pub fn layout_group_regions(
             }
             out
         }
-        GroupLayoutMode::Vertical => {
+        GroupLayoutMode::AutomaticVert => {
             // Area-proportional rows.
             let sum_sqrt: f64 = areas.iter().map(|a| a.sqrt()).sum();
             let mut heights: Vec<f64> = areas
@@ -310,8 +310,8 @@ pub fn layout_group_regions(
 }
 
 /// The numbered-group channels of an island (lock/stack/track/norm group ids,
-/// `None` = channel unset). The channel default is `GROUP_UNSET` (−10000,
-/// the addon's `MIN_VALUE + 1`).
+/// `None` = channel unset). The channel default is `GROUP_UNSET` (0 = 'N';
+/// a set group is ≥ 1).
 pub fn numbered_group_ids(island: &Island) -> [Option<u32>; 4] {
     let get = |i: usize| {
         island

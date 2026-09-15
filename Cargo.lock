@@ -15,6 +15,7 @@ version = "0.1.0"
 dependencies = [
  "researchuv-api",
  "researchuv-core",
+ "researchuv-math",
  "researchuv-unwrap",
 ]
 
@@ -31,6 +32,8 @@ version = "0.1.0"
 dependencies = [
  "researchuv-api",
  "researchuv-core",
+ "researchuv-math",
+ "researchuv-unwrap",
 ]
 
 [[package]]
@@ -50,4 +53,5 @@ version = "0.1.0"
 dependencies = [
  "researchuv-core",
  "researchuv-math",
+ "researchuv-pack",
 ]
