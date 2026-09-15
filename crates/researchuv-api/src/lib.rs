@@ -131,6 +131,9 @@ pub const CATALOG: &[ApiEntry] = &[
             opt("WeldTol", "Double", "Position weld tolerance (default 1e-12)."),
             opt("MaxIter", "Int64", "Unfold driver iterations (default 100)."),
             opt("SeamCut", "Bool", "Cut closed charts open (default false)."),
+            opt("SplitCut", "Bool", "Distortion-driven re-cutting of folding charts (default false)."),
+            opt("Threads", "Int64", "Unfold worker threads, 0 = all cores (default 0)."),
+            opt("Gpu", "Bool", "CUDA conjugate-gradient unfold solve with CPU fallback (default false)."),
             opt("Packer", "String", "\"shelf\" or \"islands\" (default shelf)."),
             opt("Padding", "Double", "Shelf packer gutter (default 0.01)."),
         ],
@@ -153,6 +156,15 @@ pub const CATALOG: &[ApiEntry] = &[
             req("MeshWarnings", "Int64", "Malformed-mesh warnings."),
             req("AtlasErrors", "Int64", "Atlas errors (unplaced/overlap/outside)."),
             req("AtlasWarnings", "Int64", "Atlas warnings (flips)."),
+        ],
+    ),
+    entry(
+        "Atlas.Get",
+        "The packed atlas of the last unwrap: per-island UV triangles and metrics.",
+        &[],
+        &[
+            req("Islands", "Array<>", "One object per island: Uv (2·N doubles), Tris (3·T ints), ConformalMean, ConformalMax, AreaRatio, Folds."),
+            req("Charts", "Int64", "Chart count."),
         ],
     ),
     entry(

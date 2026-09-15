@@ -1,0 +1,23 @@
+[package]
+name = "researchuv-editor"
+description = "Browser-served atlas editor for ResearchUV: live re-unwrap controls over the host API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lib]
+name = "researchuv_editor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "researchuv-editor"
+path = "src/main.rs"
+
+[dependencies]
+researchuv-core = { path = "../researchuv-core" }
+researchuv-api = { path = "../researchuv-api" }
+researchuv-link = { path = "../researchuv-link" }

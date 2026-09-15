@@ -258,6 +258,11 @@ impl ApiHandler for HostLink {
                 opts.unfold.max_iter =
                     self.get_i64(params, "MaxIter").map(|i| i.max(1) as usize).unwrap_or(opts.unfold.max_iter);
                 opts.seam_cut.enable = self.get_bool(params, "SeamCut").unwrap_or(opts.seam_cut.enable);
+                opts.recut.enable = self.get_bool(params, "SplitCut").unwrap_or(opts.recut.enable);
+                opts.threads = self.get_i64(params, "Threads").map(|t| t.clamp(0, 1024) as u32).unwrap_or(opts.threads);
+                if self.get_bool(params, "Gpu").unwrap_or(false) {
+                    opts.unfold.solver = researchuv_unwrap::SolverBackend::Gpu;
+                }
                 opts.padding = self.get_f64(params, "Padding").unwrap_or(opts.padding);
                 if let Some(packer) = self.get_str(params, "Packer") {
                     opts.packer = match packer {
@@ -305,6 +310,37 @@ impl ApiHandler for HostLink {
                     ("MeshWarnings", Val::Int(res.mesh_report.warnings().count() as i64)),
                     ("AtlasErrors", Val::Int(res.atlas_report.errors().count() as i64)),
                     ("AtlasWarnings", Val::Int(res.atlas_report.warnings().count() as i64)),
+                ]))
+            }
+            "Atlas.Get" => {
+                let res = self
+                    .last_result
+                    .as_ref()
+                    .ok_or_else(|| ApiError::Task("no atlas yet (Unwrap.Run first)".into()))?;
+                let mut islands_out: Vec<Val> = Vec::with_capacity(res.multi.islands.len());
+                for (i, isl) in res.multi.islands.iter().enumerate() {
+                    let mut o = CRef::new("Island");
+                    // Interleaved (u, v) doubles.
+                    o.values.push((
+                        "Uv".into(),
+                        Val::Array(isl.uv.iter().flat_map(|p| [Val::Double(p.u), Val::Double(p.v)]).collect()),
+                    ));
+                    o.values.push((
+                        "Tris".into(),
+                        Val::Array(isl.tris.iter().flat_map(|t| [Val::Int(t[0] as i64), Val::Int(t[1] as i64), Val::Int(t[2] as i64)]).collect()),
+                    ));
+                    if let Some(cr) = res.charts.get(i) {
+                        o.values.push(("ConformalMean".into(), Val::Double(cr.metrics.conformal_mean)));
+                        o.values.push(("ConformalMax".into(), Val::Double(cr.metrics.conformal_max)));
+                        o.values.push(("AreaRatio".into(), Val::Double(cr.metrics.area_ratio_mean)));
+                        o.values.push(("Folds".into(), Val::Int(cr.metrics.folds as i64)));
+                        o.values.push(("Flips".into(), Val::Int(cr.metrics.flips as i64)));
+                    }
+                    islands_out.push(Val::Object(o));
+                }
+                Ok(reply(&[
+                    ("Islands", Val::Array(islands_out)),
+                    ("Charts", Val::Int(res.charts.len() as i64)),
                 ]))
             }
             "Export.Obj" => {
