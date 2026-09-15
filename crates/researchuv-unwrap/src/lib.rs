@@ -28,6 +28,7 @@ pub mod meshgen;
 pub mod metrics;
 pub mod pack;
 pub mod pipeline;
+pub mod recut;
 pub mod seam;
 pub mod segment;
 pub mod sparse;
@@ -37,14 +38,15 @@ pub mod weld;
 pub use atlas::{chart_rings, convex_hull, pack_outlines, ChartRings};
 pub use lscm::{
     anchor_ids, border_targets, cg_solve, compute_area, compute_area_grad, edge_weights,
-    rect_point, tangent_frame, unfold_chart, UnfoldOptions, UnfoldResult,
+    rect_point, tangent_frame, unfold_chart, SolverBackend, UnfoldOptions, UnfoldResult,
     ANGLE_MIX, CONV_THRESHOLD, DEFAULT_MAX_ITER, DEFAULT_MAX_ITER_GUARD, EPS_DEGENERATE,
     KEEP_METRIC, MIX_W, STAGNATION, TRANS_THRESHOLD,
 };
-pub use metrics::{chart_distortion, rectangularize, ChartMetrics};
+pub use metrics::{chart_distortion, rectangularize, winding_flips, ChartMetrics};
 pub use pack::{pack_charts, PackBackend, PackRect, Placed};
 pub use pipeline::{run, ChartResult, Packer, PipelineError, PipelineOptions, PipelineResult};
-pub use seam::{cut_closed_charts, seam_path, SeamCutOptions};
+pub use recut::{chart_folds, recut_folding_charts, ChartFolds, RecutOptions};
+pub use seam::{border_crossing_path, cut_closed_charts, seam_path, SeamCutOptions};
 pub use segment::{
     build_charts, chart_border_loops, edge_faces, edge_key, face_areas3d, face_dihedrals,
     merge_charts, mesh_boundary_edges, segment, Chart, EdgeKey,

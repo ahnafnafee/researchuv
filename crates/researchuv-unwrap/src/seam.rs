@@ -235,6 +235,51 @@ pub fn seam_path(mesh: &SurfaceMesh, chart: &Chart) -> Vec<u32> {
     seam_paths(mesh, chart, 0).into_iter().next().unwrap_or_default()
 }
 
+/// A border-crossing chord: the geodesic diameter *between border vertices* —
+/// sweep 1 picks the min-x border vertex `A`, sweep 2 finds the farthest
+/// border vertex `B` from it, and the predecessor chain is the path. On
+/// annulus-like charts the farthest border vertex from one rim lies across
+/// the chart on the other rim, so the chord crosses the interior and cutting
+/// it separates the chart into two face components — narrower charts pin
+/// closer to their true developable width, which is what reduces folding.
+/// Returns `[A … B]` over source vertex ids (empty when no crossing exists).
+pub fn border_crossing_path(mesh: &SurfaceMesh, chart: &Chart) -> Vec<u32> {
+    if chart.border.is_empty() || chart.face_ids.len() < 2 {
+        return Vec::new();
+    }
+    let adj = chart_adjacency(mesh, chart);
+    // A: min-x border vertex (the anchor_ids convention — first occurrence).
+    let &a = chart
+        .border
+        .iter()
+        .min_by(|&&x, &&y| {
+            let px = mesh.positions[x as usize];
+            let py = mesh.positions[y as usize];
+            px.x.partial_cmp(&py.x).unwrap_or(std::cmp::Ordering::Equal).then(x.cmp(&y))
+        })
+        .unwrap();
+    let (dist, prev) = dijkstra(&adj, &[a]);
+    // B: the farthest border vertex from A (smallest id on ties).
+    let mut best: Option<(u32, f64)> = None;
+    for &v in &chart.border {
+        if v == a {
+            continue;
+        }
+        match dist.get(&v) {
+            Some(&d) if d.is_finite() => match best {
+                Some((_, bd)) if d < bd => {}
+                Some((bv, bd)) if d == bd => best = Some((bv.min(v), bd)),
+                _ => best = Some((v, d)),
+            },
+            _ => {}
+        }
+    }
+    match best {
+        Some((target, d)) if d > 1e-12 => reconstruct(&prev, target),
+        _ => Vec::new(),
+    }
+}
+
 /// Extend `cut` with seam trees for every borderless chart and rebuild the
 /// charts over the combined cut set. Charts below `opts.min_faces` keep their
 /// anchors (no cut). Returns the new `(charts, cut)`; the cut set only grows.

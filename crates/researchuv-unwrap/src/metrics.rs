@@ -22,6 +22,37 @@ pub struct ChartMetrics {
     pub area_ratio_mean: f64,
     /// Triangles whose 3-D projection was degenerate (counted as flips).
     pub flips: usize,
+    /// Winding-inconsistent UV triangles — local folds, where a triangle's
+    /// UV winding disagrees with the chart's dominant winding (the unfold
+    /// folded over itself). Distinct from `flips` (a 3-D degeneracy count).
+    pub folds: usize,
+}
+
+/// Signed area of one UV triangle (local indices).
+#[inline]
+fn tri_signed(u: Vec2, v: Vec2, w: Vec2) -> f64 {
+    (v.u - u.u) * (w.v - u.v) - (w.u - u.u) * (v.v - u.v)
+}
+
+/// Count winding-inconsistent triangles of an unfold: LSCM's null space
+/// includes reflections, so a uniformly CW chart is a valid orientation
+/// choice — only triangles that disagree with the *dominant* winding (the
+/// signed-area majority) are local folds.
+pub fn winding_flips(uv: &[Vec2], tris: &[[u32; 3]]) -> usize {
+    if tris.is_empty() {
+        return 0;
+    }
+    let mut sum = 0.0f64;
+    for [a, b, c] in tris {
+        sum += tri_signed(uv[*a as usize], uv[*b as usize], uv[*c as usize]);
+    }
+    let dom = if sum < 0.0 { -1.0 } else { 1.0 };
+    tris
+        .iter()
+        .filter(|[a, b, c]| {
+            tri_signed(uv[*a as usize], uv[*b as usize], uv[*c as usize]) * dom <= 0.0
+        })
+        .count()
 }
 
 /// Singular values of a 2×2 matrix `m` (returns (s₁, s₂), s₁ ≥ s₂ ≥ 0).
@@ -105,6 +136,7 @@ pub fn chart_distortion(mesh: &SurfaceMesh, chart: &Chart, uv_local: &[Vec2]) ->
         conformal_max: conformal.iter().cloned().fold(0.0f64, |m, x| m.max(x)),
         area_ratio_mean: area_ratios.iter().sum::<f64>() / area_ratios.len().max(1) as f64,
         flips,
+        folds: winding_flips(uv_local, &chart.tris),
     }
 }
 

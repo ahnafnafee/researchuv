@@ -10,6 +10,7 @@
 
 use crate::atlas;
 use crate::lscm::UnfoldOptions;
+use crate::recut::RecutOptions;
 use crate::metrics::{rectangularize, chart_distortion, ChartMetrics};
 use crate::pack::{pack_charts, PackRect, Placed};
 use crate::seam::{self, SeamCutOptions};
@@ -47,6 +48,12 @@ pub struct PipelineOptions {
     /// Seam cut for closed (borderless) charts — opens them along a
     /// geodesic-diameter path so the unfold pins a real border.
     pub seam_cut: SeamCutOptions,
+    /// Distortion-driven re-cutting — splits charts that fold beyond the
+    /// tolerance with border-crossing chords.
+    pub recut: RecutOptions,
+    /// Worker threads for the per-chart unfold stage (0 = all cores, 1 =
+    /// serial). Results are identical regardless of the count.
+    pub threads: u32,
     /// Unfold driver options.
     pub unfold: UnfoldOptions,
     /// Shelf-packing gutter (unit-square fraction); ignored by [`Packer::Islands`].
@@ -67,6 +74,8 @@ impl Default for PipelineOptions {
             weld_tol: 1e-12,
             angle_min_deg: 30.0,
             seam_cut: SeamCutOptions::default(),
+            recut: RecutOptions::default(),
+            threads: 0,
             unfold: UnfoldOptions::default(),
             padding: 0.01,
             pack_max_iters: 200,
@@ -144,32 +153,50 @@ pub fn run(
             seam::cut_closed_charts(&mesh, &charts, &_cut, opts.seam_cut);
         charts = cut_charts;
     }
-    // 3. Unfold + rectangularize each chart.
-    let mut results: Vec<ChartResult> = Vec::with_capacity(charts.len());
-    let mut rects: Vec<PackRect> = Vec::with_capacity(charts.len());
-    for ch in charts.drain(..) {
+    // 2b. Distortion-driven re-cutting: split charts that fold.
+    if opts.recut.enable {
+        let (recut_charts, _cut_all, _added) = crate::recut::recut_folding_charts(
+            &mesh,
+            charts,
+            &_cut,
+            opts.recut,
+            opts.unfold,
+            opts.seam_cut,
+        );
+        charts = recut_charts;
+    }
+    // 3. Unfold + rectangularize each chart. Charts are independent, so the
+    //    stage runs on the parallel executor (results in input order —
+    //    identical to the serial run for any worker count).
+    let unfold_stage = |ch: Chart| -> (ChartResult, PackRect) {
         let res = crate::lscm::unfold_chart(&mesh, &ch, opts.unfold);
         // Border vertices in chart-local indices.
-        let bnd_local: Vec<usize> = ch
-            .border
-            .iter()
-            .filter_map(|&v| ch.local_of(v))
-            .collect();
+        let bnd_local: Vec<usize> =
+            ch.border.iter().filter_map(|&v| ch.local_of(v)).collect();
         let (q, ext) = rectangularize(&res.uv, &bnd_local);
         let met = chart_distortion(&mesh, &ch, &res.uv);
-        rects.push(PackRect {
-            w: ext.u.max(1e-6),
-            h: ext.v.max(1e-6),
-        });
-        results.push(ChartResult {
-            chart: ch,
-            uv: res.uv.clone(),
-            rectified: q,
-            ext,
-            metrics: met,
-            iters: res.iters,
-            area3d: res.area3d,
-        });
+        let rect = PackRect { w: ext.u.max(1e-6), h: ext.v.max(1e-6) };
+        (
+            ChartResult {
+                chart: ch,
+                uv: res.uv.clone(),
+                rectified: q,
+                ext,
+                metrics: met,
+                iters: res.iters,
+                area3d: res.area3d,
+            },
+            rect,
+        )
+    };
+    let workers = researchuv_core::exec::worker_count(opts.threads);
+    let per_chart: Vec<(ChartResult, PackRect)> =
+        researchuv_core::exec::par_map(workers, charts, unfold_stage);
+    let mut results: Vec<ChartResult> = Vec::with_capacity(per_chart.len());
+    let mut rects: Vec<PackRect> = Vec::with_capacity(per_chart.len());
+    for (cr, rect) in per_chart {
+        results.push(cr);
+        rects.push(rect);
     }
     // 4. Pack into the unit square, then assemble the final per-vertex UVs.
     let (scale, placed, island_pack, final_uv) = match opts.packer {
@@ -313,6 +340,43 @@ impl std::error::Error for PipelineError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_count_does_not_change_results() {
+        let (p, f) = crate::meshgen::cube(6);
+        let mut one = PipelineOptions::default();
+        one.threads = 1;
+        let mut many = PipelineOptions::default();
+        many.threads = 8;
+        let a = run(p.clone(), f.clone(), &one).unwrap();
+        let b = run(p, f, &many).unwrap();
+        assert_eq!(a.charts.len(), b.charts.len());
+        for (x, y) in a.charts.iter().zip(b.charts.iter()) {
+            assert_eq!(x.uv.len(), y.uv.len());
+            assert_eq!(x.uv, y.uv, "UVs must be bitwise identical across worker counts");
+            assert_eq!(x.rectified, y.rectified);
+        }
+        assert_eq!(a.placed.len(), b.placed.len());
+    }
+
+    #[test]
+    fn recut_reduces_folds_in_the_pipeline_result() {
+        let (p, f) = crate::meshgen::torus_annulus(2.0, 0.7, 24, 16);
+        let plain = run(p.clone(), f.clone(), &PipelineOptions::default()).unwrap();
+        let mut o = PipelineOptions::default();
+        o.recut.enable = true;
+        let cut = run(p, f, &o).unwrap();
+        let folds =
+            |r: &PipelineResult| r.charts.iter().map(|c| c.metrics.folds).sum::<usize>();
+        assert!(
+            folds(&cut) < folds(&plain),
+            "folds {} vs {}",
+            folds(&cut),
+            folds(&plain)
+        );
+        assert!(cut.charts.len() > plain.charts.len(), "the strip was split");
+        assert!(cut.placed.iter().all(|p| p.is_some()), "all split charts placed");
+    }
 
     #[test]
     fn invalid_input_is_rejected_with_findings() {
