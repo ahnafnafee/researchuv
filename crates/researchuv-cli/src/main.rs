@@ -34,6 +34,11 @@ OPTIONS (unwrap):
     --iters <N>                  Unfold driver iterations (default 100).
     --packer <shelf|islands>     Final packer (default: islands).
     --seam-cut|--no-seam-cut     Cut closed charts open (default: off).
+    --recut|--no-recut           Distortion-driven re-cut of folding charts
+                                 (default: off).
+    --threads <N>                Unfold worker threads, 0 = all cores.
+    --gpu|--no-gpu               CUDA conjugate-gradient unfold solve with
+                                 CPU fallback (default: off).
     --padding <F>                Shelf packer gutter (default 0.01).
     --margin <F>                 Island packer margin (default 0.003).
     --rotation-step <DEG>        Island rotation step (default 90).
@@ -163,7 +168,7 @@ fn resolve_source(args: &[String]) -> Result<Option<(Vec<Vec3>, Vec<[u32; 3]>, S
             if matches!(
                 a.as_str(),
                 "-o" | "--output" | "--svg" | "--stl" | "--angle" | "--weld" | "--iters" | "--packer"
-                    | "--padding" | "--margin" | "--rotation-step" | "--heuristic"
+                    | "--padding" | "--margin" | "--rotation-step" | "--heuristic" | "--threads"
             ) {
                 skip_next = true;
             }
@@ -271,6 +276,13 @@ fn cmd_unwrap(args: &[String]) -> ExitCode {
             }),
             "--seam-cut" => Ok(opts.seam_cut.enable = true),
             "--no-seam-cut" => Ok(opts.seam_cut.enable = false),
+            "--recut" => Ok(opts.recut.enable = true),
+            "--no-recut" => Ok(opts.recut.enable = false),
+            "--threads" => value(&mut i)
+                .and_then(|v| v.parse::<u32>().map_err(|e| e.to_string()))
+                .map(|v| opts.threads = v.min(1024)),
+            "--gpu" => Ok(opts.unfold.solver = researchuv_unwrap::SolverBackend::Gpu),
+            "--no-gpu" => Ok(opts.unfold.solver = researchuv_unwrap::SolverBackend::Cpu),
             "--padding" => value(&mut i)
                 .and_then(|v| v.parse::<f64>().map_err(|e| e.to_string()))
                 .map(|v| opts.padding = v),
@@ -418,6 +430,10 @@ fn cmd_unwrap(args: &[String]) -> ExitCode {
         println!("stl            {}", stl_path.display());
     }
     println!("source         {label}");
+    println!("solver         {}", match opts.unfold.solver {
+        researchuv_unwrap::SolverBackend::Cpu => "cpu",
+        researchuv_unwrap::SolverBackend::Gpu => "gpu (cuda, cpu fallback)",
+    });
     println!("packer         {}", match opts.packer {
         Packer::Shelf => "shelf",
         Packer::Islands => "islands",

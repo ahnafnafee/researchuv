@@ -16,10 +16,10 @@ Build on the individual crates or run the complete unfolding pipeline.
 ![Rust 2021](https://img.shields.io/badge/Rust-2021-dc7653?style=flat-square&logo=rust&logoColor=white)
 ![Status: experimental](https://img.shields.io/badge/status-experimental-e5b75e?style=flat-square)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-627f91?style=flat-square)](LICENSE)
-![Backend: CPU](https://img.shields.io/badge/backend-CPU-4e9a8b?style=flat-square)
+![Backend: CPU + CUDA](https://img.shields.io/badge/backend-CPU_+_CUDA-4e9a8b?style=flat-square)
 ![Dependencies: workspace only](https://img.shields.io/badge/dependencies-workspace_only-627f91?style=flat-square)
 
-<sub>Seven crates · inspectable algorithms · reproducible mesh fixtures</sub>
+<sub>Nine crates · inspectable algorithms · reproducible mesh fixtures</sub>
 
 </div>
 
@@ -63,6 +63,16 @@ The example creates a subdivided cube, runs the unfolding pipeline, and writes i
 <sub>Actual output from the included cube example. Colors identify islands; lines show the triangle mesh.</sub>
 </div>
 
+### Open the editor
+
+A browser-served atlas editor runs the whole pipeline live:
+
+```sh
+cargo run --locked --release -p researchuv-editor -- --open
+```
+
+Pick a fixture, tune the cut angle, packer, seam cuts, distortion-driven re-cutting, thread count, and the CUDA solve; every run repaints the packed islands with per-chart distortion metrics.
+
 ### Use the command line
 
 The `researchuv` CLI unwraps OBJ/STL files or built-in fixtures and writes the packed atlas back out:
@@ -103,7 +113,7 @@ researchuv-unwrap = { path = "../researchuv/crates/researchuv-unwrap" }
 ```
 
 > [!NOTE]
-> The desktop editor and GPU execution are not implemented. Everything else — CLI, I/O, API catalog, host integration — is available from the Rust API.
+> Everything is available from the Rust API: CLI, editor, I/O, API catalog, host integration, multi-core and CUDA execution.
 
 <a id="features"></a>
 
@@ -115,7 +125,7 @@ Construct half-edge surfaces from triangles, traverse face adjacency, and keep s
 
 ### A complete unfolding path
 
-Weld coincident vertices, split the mesh into charts at sharp edges, and solve for UV coordinates with a least-squares conformal mapping (LSCM) driver. Per-chart diagnostics report angular distortion, area ratios, and flipped triangles before the results are normalized and packed.
+Weld coincident vertices, split the mesh into charts at sharp edges (optional geodesic seam trees for closed surfaces and distortion-driven re-cutting for charts that fold), and solve for UV coordinates with a least-squares conformal mapping (LSCM) driver — on the CPU's direct sparse LU, on worker threads, or on the GPU. Per-chart diagnostics report angular distortion, area ratios, flipped triangles, and winding folds before the results are normalized and packed.
 
 ### Packing as a separate building block — now wired in
 
@@ -126,10 +136,11 @@ The unfolding pipeline offers two final packers: the historic greedy shelf packe
 | **Mesh preparation** | Vertex welding, degenerate-face filtering, adjacency, and boundary loops |
 | **Unwrapping** | Sharp-edge charting, geodesic seam trees for closed charts, least-squares solving, border constraints, and chart normalization |
 | **Packing** | Shelf packing or the configurable UVPackmaster-grade island packer, connected to the pipeline |
-| **Diagnostics** | Conformal and area distortion, winding-consistency flips, overlap checks, and topology invariants |
+| **Diagnostics** | Conformal and area distortion, winding-consistency folds, overlap checks, and topology invariants |
 | **Validation** | Malformed-mesh reports (indices, NaNs, non-manifold edges, isolated vertices) and atlas reports (unplaced islands, UVs outside `[0,1]²`, overlaps) |
 | **Fixtures** | Subdivided cubes, UV spheres, closed tori, torus annuli, grid planes, and open cylinders |
-| **I/O & tooling** | OBJ/STL import, OBJ/STL/SVG export, the `researchuv` CLI, a catalog API with host dispatch, and stage benchmarks |
+| **Execution** | Deterministic multi-core unfold stage, plus a CUDA conjugate-gradient solver (120×+ on large charts, CPU fallback) |
+| **I/O & tooling** | OBJ/STL import, OBJ/STL/SVG export, the `researchuv` CLI, a catalog API with host dispatch, a browser atlas editor, and stage benchmarks |
 
 <div align="right">
 
@@ -154,7 +165,7 @@ flowchart LR
 `PipelineOptions` exposes welding tolerance, the sharp-edge angle, the seam-cut policy, unfolding settings, packer selection (`Shelf` or `Islands` with the full `PackParams` surface), padding, and retry limits. `PipelineResult` returns the welded mesh, chart results with distortion metrics, placement status, scale, final islands, the island packer's full result contract, and validation reports — so callers can inspect intermediate results as well as the packed output.
 
 > [!IMPORTANT]
-> Inspect placement status, distortion, and the validation reports before using an atlas. Closed and strongly curved charts fold under the rectangle-pinned least-squares solve (the reference behavior the baselines record); the atlas validator reports winding-inconsistent triangles, unplaced islands, and overlaps as findings. GPU execution and a desktop editor are not implemented.
+> Inspect placement status, distortion, and the validation reports before using an atlas. Strongly curved charts can fold under the rectangle-pinned least-squares solve; the validator reports winding-inconsistent triangles and the `--recut` / `SplitCut` option re-cuts folding charts automatically.
 
 <a id="workspace"></a>
 
@@ -169,6 +180,8 @@ flowchart LR
 | [`researchuv-api`](crates/researchuv-api) | Structured API catalog | Implemented |
 | [`researchuv-link`](crates/researchuv-link) | Host integration (catalog dispatch + wire framing) | Implemented |
 | [`researchuv-cli`](crates/researchuv-cli) | Command-line entry point | Implemented |
+| [`researchuv-gpu`](crates/researchuv-gpu) | CUDA conjugate-gradient solver (runtime-loaded driver API) | Implemented |
+| [`researchuv-editor`](crates/researchuv-editor) | Browser-served atlas editor | Implemented |
 
 The current dependency graph contains only workspace crates. Numerical kernels and geometry utilities use the Rust standard library.
 
@@ -183,7 +196,8 @@ cargo test --workspace --locked --release
 # Exercise the mesh pipeline regression fixtures.
 cargo test --locked --release -p researchuv-unwrap --test parity
 
-# Time the pipeline stages over the fixture set (incl. large grids/cylinders).
+# Time the pipeline stages over the fixture set (incl. large grids/cylinders
+# and a CUDA-solve column when a device is present).
 cargo bench --locked -p researchuv-unwrap
 
 # Generate local API documentation.
@@ -202,8 +216,9 @@ Release-mode tests make the larger sphere and torus fixtures practical to run. T
 - [x] Improve seam selection and distortion on closed surfaces.
 - [x] Expand validation for malformed meshes and unsuccessful packing.
 - [x] Add performance benchmarks and larger mesh fixtures.
-- [ ] GPU execution and a desktop editor.
-- [ ] Distortion-driven chart splitting (folding charts re-cut automatically).
+- [x] GPU execution (CUDA conjugate-gradient unfold solve) and an interactive atlas editor (browser-served).
+- [x] Distortion-driven chart splitting (folding charts re-cut automatically).
+- [ ] Preconditioned GPU solver (Jacobi/IC0) and GPU packing heuristics.
 
 <a id="contributing"></a>
 
