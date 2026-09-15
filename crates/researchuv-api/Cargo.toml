@@ -1,6 +1,6 @@
 [package]
 name = "researchuv-api"
-description = "Reserved API catalog crate for ResearchUV; implementation pending."
+description = "Structured API catalog for ResearchUV: entries, field schemas, and the dispatch trait."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

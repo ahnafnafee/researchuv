@@ -1,6 +1,6 @@
 [package]
 name = "researchuv-link"
-description = "Reserved host integration crate for ResearchUV; implementation pending."
+description = "Host integration layer for ResearchUV: wire framing and catalog dispatch over the engine."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,3 +12,5 @@ repository.workspace = true
 [dependencies]
 researchuv-core = { path = "../researchuv-core" }
 researchuv-api = { path = "../researchuv-api" }
+researchuv-unwrap = { path = "../researchuv-unwrap" }
+researchuv-math = { path = "../researchuv-math" }
