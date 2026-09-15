@@ -17,8 +17,12 @@
 //! driver boundary requires it. Everything above [`solver`] stays safe.
 
 pub mod ffi;
+pub mod heuristic;
+pub mod precond;
 pub mod solver;
 
+pub use heuristic::{refine, LayoutBox};
+pub use precond::{factor_ic0, Ic0Factor, Precond};
 pub use solver::{CsrMatrix, GpuSolver};
 
 #[cfg(test)]

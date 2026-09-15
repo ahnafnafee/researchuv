@@ -458,28 +458,16 @@ pub fn cg_solve(matrix: &Sparse, rhs: &[f64], max_iter: usize) -> Option<Vec<f64
     Some(x)
 }
 
-/// The engine-wide GPU solver (initialized on first use; `None` when CUDA
-/// is unavailable — every GPU request then falls back to the CPU solve).
-static GPU: std::sync::OnceLock<std::sync::Mutex<Option<researchuv_gpu::GpuSolver>>> =
-    std::sync::OnceLock::new();
-
-fn gpu_solver() -> &'static std::sync::Mutex<Option<researchuv_gpu::GpuSolver>> {
-    GPU.get_or_init(|| {
-        let solver = researchuv_gpu::GpuSolver::new();
-        if solver.is_some() {
-            eprintln!("researchuv-gpu: CUDA solver active");
-        }
-        std::sync::Mutex::new(solver)
-    })
-}
-
 /// Below this free-variable count the CPU LU wins (upload + JIT overhead).
 const GPU_MIN_VARS: usize = 1024;
 
-/// Solve the assembled system on the GPU: the SPD free block via CUDA CG,
-/// the decoupled slack variable analytically. `None` when the GPU path is
-/// not applicable (too small, `KeepMetric`'s non-symmetric rows, or no
-/// device) — the caller falls back to the direct LU.
+/// Solve the assembled system on the GPU: the SPD free block via CUDA
+/// conjugate gradients (Jacobi-preconditioned — the engine's cotan-weight
+/// diagonals vary enough for it to pay, and unlike IC(0)'s level-scheduled
+/// triangular solves it has no launch-count risk on elongated charts), the
+/// decoupled slack variable analytically. `None` when the GPU path is not
+/// applicable (too small, `KeepMetric`'s non-symmetric rows, or no device) —
+/// the caller falls back to the direct LU.
 fn gpu_solve(
     matrix: &Sparse,
     rhs: &[f64],
@@ -496,9 +484,16 @@ fn gpu_solve(
         return None;
     }
     let a = researchuv_gpu::CsrMatrix { vals, cols, row_ptr };
-    let guard = gpu_solver().lock().ok()?;
-    let gpu = guard.as_ref()?;
-    let mut x = gpu.cg_solve(&a, &rhs[..nvar_free], max_iter.max(1024) * 16, 1e-12)?;
+    let gpu = researchuv_gpu::GpuSolver::global()?;
+    let mut x = gpu
+        .cg_solve_precond(
+            &a,
+            &rhs[..nvar_free],
+            max_iter.max(1024) * 16,
+            1e-12,
+            researchuv_gpu::Precond::Jacobi,
+        )?
+        .0;
     // Slack row: M[aux][aux] = mix_w, rhs[aux] = mix_w ⇒ slack = 1.
     x.push(1.0);
     Some(x)

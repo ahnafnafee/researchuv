@@ -11,6 +11,7 @@ fn main() {
     let ptx_path = out.join("cg_kernels.ptx");
     let src = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/kernels.cu");
     println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rustc-check-cfg=cfg(have_ptx)");
 
     let nvcc = env::var("NVCC")
         .ok()
