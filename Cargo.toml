@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/researchuv-math",
+    "crates/researchuv-core",
+    "crates/researchuv-unwrap",
+    "crates/researchuv-pack",
+    "crates/researchuv-api",
+    "crates/researchuv-link",
+    "crates/researchuv-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+authors = ["ResearchUV contributors"]
+publish = false
+repository = "https://github.com/ahnafnafee/researchuv"
+
+# ResearchUV — an experimental Rust workspace for UV unwrapping and island packing.
+# See README.md for the implemented modules and development roadmap.
+
+# Shared dependency versions pinned once for the whole workspace.
+[workspace.dependencies]
+thiserror = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16

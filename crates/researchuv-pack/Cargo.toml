@@ -1,0 +1,13 @@
+[package]
+name = "researchuv-pack"
+description = "UVPackmaster-grade island packing engine (Rust clone of the uvpm.exe GPU packer + the addon's documented option surface)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+researchuv-math = { path = "../researchuv-math" }

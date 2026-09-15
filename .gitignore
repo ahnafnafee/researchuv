@@ -1,0 +1,12 @@
+/target/
+**/target/
+/cube-uv.svg
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+*.pdb
+*.log
+.env
+.env.*
+!.env.example

@@ -1,0 +1,12 @@
+[package]
+name = "researchuv-math"
+description = "Vectors, matrices, per-triangle geometry, bounding boxes, and packing transforms for ResearchUV."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
