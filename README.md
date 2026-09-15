@@ -63,6 +63,18 @@ The example creates a subdivided cube, runs the unfolding pipeline, and writes i
 <sub>Actual output from the included cube example. Colors identify islands; lines show the triangle mesh.</sub>
 </div>
 
+### Use the command line
+
+The `researchuv` CLI unwraps OBJ/STL files or built-in fixtures and writes the packed atlas back out:
+
+```sh
+cargo run --locked --release -p researchuv-cli -- unwrap --fixture cube 6 --svg cube-atlas.svg
+cargo run --locked --release -p researchuv-cli -- unwrap model.obj -o model-uv.obj
+cargo run --locked --release -p researchuv-cli -- info model.stl
+```
+
+`unwrap` prints a per-chart distortion table, uses the island packer by default (`--packer shelf` restores the reference packer), can seam-cut closed surfaces (`--seam-cut`), and exits non-zero when validation finds errors.
+
 ### Use the library
 
 The same pipeline accepts vertex positions and triangle indices from your own mesh loader. This minimal example uses a built-in fixture:
@@ -71,10 +83,12 @@ The same pipeline accepts vertex positions and triangle indices from your own me
 use researchuv_unwrap::{meshgen, run, PipelineOptions};
 
 let (positions, triangles) = meshgen::cube(6);
-let result = run(positions, triangles, &PipelineOptions::default());
+let result = run(positions, triangles, &PipelineOptions::default())
+    .expect("the input was validated");
 
 assert_eq!(result.charts.len(), 6);
 assert!(result.placed.iter().all(Option::is_some));
+assert!(!result.atlas_report.has_errors());
 
 for island in &result.multi.islands {
     println!("{} vertices, {} triangles", island.uv.len(), island.tris.len());
@@ -89,7 +103,7 @@ researchuv-unwrap = { path = "../researchuv/crates/researchuv-unwrap" }
 ```
 
 > [!NOTE]
-> ResearchUV is a library prototype. The CLI, API catalog, and host integration crates are scaffolds. Use the Rust API or the included example to run the implemented algorithms.
+> The desktop editor and GPU execution are not implemented. Everything else — CLI, I/O, API catalog, host integration — is available from the Rust API.
 
 <a id="features"></a>
 
@@ -103,17 +117,19 @@ Construct half-edge surfaces from triangles, traverse face adjacency, and keep s
 
 Weld coincident vertices, split the mesh into charts at sharp edges, and solve for UV coordinates with a least-squares conformal mapping (LSCM) driver. Per-chart diagnostics report angular distortion, area ratios, and flipped triangles before the results are normalized and packed.
 
-### Packing as a separate building block
+### Packing as a separate building block — now wired in
 
-The unfolding pipeline uses a compact shelf packer. The separate `researchuv-pack` crate offers polygon placement, rotations, scale policies, target boxes, grouping, similarity operations, texel density, pixel alignment, and overlap validation. Its API can be used independently; it is not yet wired into the unfolding pipeline.
+The unfolding pipeline offers two final packers: the historic greedy shelf packer (the reference `CFinalPack` behavior recorded by the regression baselines) and the separate `researchuv-pack` engine — a CPU clone of UVPackmaster 4.1.2's island packer with rotations, flips, margins (relative or pixel), scale modes, target boxes, tiling, grouping, similarity stacking, texel density, pixel-perfect alignment, a time-budgeted heuristic search, and polygon-level overlap validation on island outlines *with holes*. Select it with `PipelineOptions.packer = Packer::Islands` (the CLI uses it by default).
 
 | Area | Available building blocks |
 | --- | --- |
 | **Mesh preparation** | Vertex welding, degenerate-face filtering, adjacency, and boundary loops |
-| **Unwrapping** | Sharp-edge charting, least-squares solving, border constraints, and chart normalization |
-| **Packing** | Shelf packing in the unwrap pipeline; a separate configurable CPU island packer |
-| **Diagnostics** | Conformal and area distortion, triangle flips, overlap checks, and topology invariants |
-| **Fixtures** | Subdivided cubes, UV spheres, closed tori, and torus annuli |
+| **Unwrapping** | Sharp-edge charting, geodesic seam trees for closed charts, least-squares solving, border constraints, and chart normalization |
+| **Packing** | Shelf packing or the configurable UVPackmaster-grade island packer, connected to the pipeline |
+| **Diagnostics** | Conformal and area distortion, winding-consistency flips, overlap checks, and topology invariants |
+| **Validation** | Malformed-mesh reports (indices, NaNs, non-manifold edges, isolated vertices) and atlas reports (unplaced islands, UVs outside `[0,1]²`, overlaps) |
+| **Fixtures** | Subdivided cubes, UV spheres, closed tori, torus annuli, grid planes, and open cylinders |
+| **I/O & tooling** | OBJ/STL import, OBJ/STL/SVG export, the `researchuv` CLI, a catalog API with host dispatch, and stage benchmarks |
 
 <div align="right">
 
@@ -135,10 +151,10 @@ flowchart LR
     F --> G[UV coordinates + diagnostics]
 ```
 
-`PipelineOptions` exposes welding tolerance, the sharp-edge angle, unfolding settings, packing padding, and retry limits. `PipelineResult` returns the welded mesh, chart results, placement status, scale, and final islands, so callers can inspect intermediate results as well as the packed output.
+`PipelineOptions` exposes welding tolerance, the sharp-edge angle, the seam-cut policy, unfolding settings, packer selection (`Shelf` or `Islands` with the full `PackParams` surface), padding, and retry limits. `PipelineResult` returns the welded mesh, chart results with distortion metrics, placement status, scale, final islands, the island packer's full result contract, and validation reports — so callers can inspect intermediate results as well as the packed output.
 
 > [!IMPORTANT]
-> Inspect placement status and distortion before using an atlas. Closed charts can have substantial distortion, and the current pipeline can produce fallback UVs when packing fails. GPU execution, mesh file import/export, and a desktop editor are not implemented.
+> Inspect placement status, distortion, and the validation reports before using an atlas. Closed and strongly curved charts fold under the rectangle-pinned least-squares solve (the reference behavior the baselines record); the atlas validator reports winding-inconsistent triangles, unplaced islands, and overlaps as findings. GPU execution and a desktop editor are not implemented.
 
 <a id="workspace"></a>
 
@@ -147,12 +163,12 @@ flowchart LR
 | Crate | Role | Status |
 | --- | --- | --- |
 | [`researchuv-math`](crates/researchuv-math) | Vectors, matrices, geometry factors, and bounding boxes | Implemented |
-| [`researchuv-core`](crates/researchuv-core) | Mesh topology, values, tasks, configuration, and undo/redo | Implemented |
-| [`researchuv-unwrap`](crates/researchuv-unwrap) | End-to-end unfolding and shelf packing | Implemented |
-| [`researchuv-pack`](crates/researchuv-pack) | Configurable CPU island packing | Implemented separately |
-| [`researchuv-api`](crates/researchuv-api) | Structured API catalog | Scaffold |
-| [`researchuv-link`](crates/researchuv-link) | Host integration | Scaffold |
-| [`researchuv-cli`](crates/researchuv-cli) | Command-line entry point | Scaffold |
+| [`researchuv-core`](crates/researchuv-core) | Mesh topology, values, tasks, configuration, undo/redo, and OBJ/STL/SVG I/O | Implemented |
+| [`researchuv-unwrap`](crates/researchuv-unwrap) | End-to-end unfolding, seam cutting, validation, and packing | Implemented |
+| [`researchuv-pack`](crates/researchuv-pack) | UVPackmaster-4.1.2-grade CPU island packing | Implemented |
+| [`researchuv-api`](crates/researchuv-api) | Structured API catalog | Implemented |
+| [`researchuv-link`](crates/researchuv-link) | Host integration (catalog dispatch + wire framing) | Implemented |
+| [`researchuv-cli`](crates/researchuv-cli) | Command-line entry point | Implemented |
 
 The current dependency graph contains only workspace crates. Numerical kernels and geometry utilities use the Rust standard library.
 
@@ -167,22 +183,27 @@ cargo test --workspace --locked --release
 # Exercise the mesh pipeline regression fixtures.
 cargo test --locked --release -p researchuv-unwrap --test parity
 
+# Time the pipeline stages over the fixture set (incl. large grids/cylinders).
+cargo bench --locked -p researchuv-unwrap
+
 # Generate local API documentation.
 cargo doc --workspace --no-deps --open
 ```
 
-Release-mode tests make the larger sphere and torus fixtures practical to run. The suite checks numerical primitives, topology, serialization, task behavior, packing constraints, and the four end-to-end mesh fixtures. These tests establish regression behavior for the included cases; they are not a benchmark of arbitrary production meshes.
+Release-mode tests make the larger sphere and torus fixtures practical to run. The suite checks numerical primitives, topology, serialization, task behavior, packing constraints, I/O round-trips, the CLI end to end, and the four original mesh fixtures. These tests establish regression behavior for the included cases; they are not a benchmark of arbitrary production meshes.
 
 <a id="roadmap"></a>
 
 ## 🗺️ Roadmap
 
-- [ ] Connect the configurable island packer to the unfolding pipeline.
-- [ ] Add mesh import/export and a working CLI.
-- [ ] Implement the API catalog and host integration layer.
-- [ ] Improve seam selection and distortion on closed surfaces.
-- [ ] Expand validation for malformed meshes and unsuccessful packing.
-- [ ] Add performance benchmarks and larger mesh fixtures.
+- [x] Connect the configurable island packer to the unfolding pipeline.
+- [x] Add mesh import/export and a working CLI.
+- [x] Implement the API catalog and host integration layer.
+- [x] Improve seam selection and distortion on closed surfaces.
+- [x] Expand validation for malformed meshes and unsuccessful packing.
+- [x] Add performance benchmarks and larger mesh fixtures.
+- [ ] GPU execution and a desktop editor.
+- [ ] Distortion-driven chart splitting (folding charts re-cut automatically).
 
 <a id="contributing"></a>
 
