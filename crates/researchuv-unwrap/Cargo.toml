@@ -12,3 +12,8 @@ repository.workspace = true
 [dependencies]
 researchuv-math = { path = "../researchuv-math" }
 researchuv-core = { path = "../researchuv-core" }
+researchuv-pack = { path = "../researchuv-pack" }
+
+[[bench]]
+name = "pipeline"
+harness = false

@@ -9,11 +9,29 @@
 use std::collections::BTreeMap;
 
 /// Sparse matrix in row-indexed (COO-like) form with duplicate entries summed.
+///
+/// The LU factorization is memoized: `solve` reuses the cached factors while
+/// the matrix is unchanged (the unfold driver re-solves an identical system
+/// on its convergence-check iteration). The cache lives behind a `RefCell`
+/// so the read-only `solve`/`lu` API stays `&self`; the crate is
+/// single-threaded by design.
 #[derive(Clone, Debug, Default)]
 pub struct Sparse {
     pub n: usize,
     /// row -> (col -> value), sorted for deterministic elimination.
     rows: Vec<BTreeMap<usize, f64>>,
+    /// Memoized LU factors (cleared by [`Sparse::add`]).
+    lu_cache: std::cell::RefCell<Option<Box<LuFactors>>>,
+}
+
+/// The factorization payload: column permutation, partial-pivoting swaps,
+/// combined L/U storage, and the factor nonzero count.
+#[derive(Clone, Debug, Default)]
+struct LuFactors {
+    perm: Vec<usize>,
+    swaps: Vec<(usize, usize)>,
+    lu: BTreeMap<(usize, usize), f64>,
+    nnz: usize,
 }
 
 impl Sparse {
@@ -21,6 +39,7 @@ impl Sparse {
         Self {
             n,
             rows: vec![BTreeMap::new(); n],
+            lu_cache: std::cell::RefCell::new(None),
         }
     }
 
@@ -28,6 +47,7 @@ impl Sparse {
     pub fn add(&mut self, row: usize, col: usize, val: f64) {
         if val != 0.0 {
             *self.rows[row].entry(col).or_insert(0.0) += val;
+            *self.lu_cache.get_mut() = None;
         }
     }
 
@@ -61,20 +81,38 @@ impl Sparse {
     /// permutation (variable `perm[i]` becomes the i-th pivot), `swaps` is the
     /// sequence of partial-pivoting row swaps `(k, piv)` applied during
     /// elimination (the RHS must be permuted with them too), and `lu` is the
-    /// combined L (unit lower) / U (upper) storage.
+    /// combined L (unit lower) / U (upper) storage. The result is memoized —
+    /// repeated calls on an unchanged matrix return the cached factors.
     pub fn lu(&self) -> (Vec<usize>, Vec<(usize, usize)>, BTreeMap<(usize, usize), f64>, usize) {
+        let f = self.cached_factors();
+        (f.perm.clone(), f.swaps.clone(), f.lu.clone(), f.nnz)
+    }
+
+    /// The memoized factors: compute on first use, reuse until `add` clears.
+    fn cached_factors(&self) -> std::cell::Ref<'_, Box<LuFactors>> {
+        if self.lu_cache.borrow().is_none() {
+            let f = self.factorize();
+            *self.lu_cache.borrow_mut() = Some(f);
+        }
+        // The only other borrower above has ended; hand out a read guard.
+        std::cell::Ref::map(self.lu_cache.borrow(), |c| c.as_ref().expect("just computed"))
+    }
+
+    fn factorize(&self) -> Box<LuFactors> {
         let perm = self.markowitz_order();
         let n = self.n;
-        // Build permuted matrix as dense maps for elimination (n is small in practice:
-        // per-chart variable count, a few thousand at most).
+        // Inverse permutation: inv[perm[i]] = i (O(1) lookups below).
+        let mut inv = vec![0usize; n];
+        for (i, &c) in perm.iter().enumerate() {
+            inv[c] = i;
+        }
+        // Build the permuted matrix for elimination.
         let mut a: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
         for (i, &c) in perm.iter().enumerate() {
             for (&cc, &v) in &self.rows[c] {
-                let j = perm.iter().position(|&x| x == cc).unwrap();
-                a[i].insert(j, v);
+                a[i].insert(inv[cc], v);
             }
         }
-        let _ = n;
         let mut swaps: Vec<(usize, usize)> = Vec::new();
         let mut lu: BTreeMap<(usize, usize), f64> = BTreeMap::new();
         let mut nnz = 0usize;
@@ -153,18 +191,21 @@ impl Sparse {
                 }
             }
         }
-        (perm, swaps, lu, nnz)
+        Box::new(LuFactors { perm, swaps, lu, nnz })
     }
 
     /// Solve `A x = b` via the LU factorization. Returns `None` if the system is
-    /// (numerically) singular or the solution is non-finite.
+    /// (numerically) singular or the solution is non-finite. The factorization
+    /// is computed once and reused across solves of an unchanged matrix.
     pub fn solve(&self, b: &[f64]) -> Option<Vec<f64>> {
-        let (perm, swaps, lu, _nnz) = self.lu();
+        let factors = self.cached_factors();
+        let f = &**factors;
+        let (perm, swaps, lu) = (&f.perm, &f.swaps, &f.lu);
         let n = self.n;
         // Permute RHS: b[perm[i]], then apply the partial-pivoting row swaps in
         // the same order the factorization applied them to the matrix.
         let mut bp: Vec<f64> = perm.iter().map(|&c| b[c]).collect();
-        for &(k, piv) in &swaps {
+        for &(k, piv) in swaps {
             bp.swap(k, piv);
         }
         // Forward substitution for L y = bp (L is unit lower; lu[(r,k)] for r>k is L).
@@ -270,6 +311,53 @@ mod tests {
         a.add(0, 0, 3.0);
         a.add(0, 0, 2.0);
         assert!((a.get(0, 0) - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn factorization_is_reused_and_invalidated() {
+        // Repeated solves of an unchanged matrix must agree; adding an entry
+        // must drop the stale factors (the result changes).
+        let mut a = Sparse::new(2);
+        a.add(0, 0, 4.0);
+        a.add(1, 1, 2.0);
+        let b = [8.0, 6.0];
+        let x1 = a.solve(&b).unwrap();
+        let x2 = a.solve(&b).unwrap();
+        assert_eq!(x1, x2);
+        assert!((x1[0] - 2.0).abs() < 1e-12 && (x1[1] - 3.0).abs() < 1e-12);
+        a.add(0, 1, 1.0); // now coupled: 4x + y = 8, 2y = 6 → x = 1.25
+        let x3 = a.solve(&b).unwrap();
+        assert!((x3[0] - 1.25).abs() < 1e-12, "x0 = {}", x3[0]);
+        // The public lu() also round-trips through the cache.
+        let (perm, _swaps, _lu, _nnz) = a.lu();
+        assert_eq!(perm.len(), 2);
+    }
+
+    #[test]
+    fn solves_a_banded_grid_system() {
+        // A 5x5 interior-grid Poisson system (banded, like the driver's free
+        // block on a grid chart): (4 on the diagonal, −1 to the 4-neighborhood).
+        let n = 25;
+        let mut a = Sparse::new(n);
+        for i in 0..n {
+            let (r, c) = (i / 5, i % 5);
+            a.add(i, i, 4.0);
+            for (dr, dc) in [(0i32, 1), (0, -1), (1, 0), (-1, 0)] {
+                let (rr, cc) = (r as i32 + dr, c as i32 + dc);
+                if (0..5).contains(&rr) && (0..5).contains(&cc) {
+                    a.add(i, (rr * 5 + cc) as usize, -1.0);
+                }
+            }
+        }
+        let b: Vec<f64> = (0..n).map(|i| (i as f64) * 0.1 + 1.0).collect();
+        let x = a.solve(&b).expect("grid system solves");
+        for i in 0..n {
+            let mut s = 0.0;
+            for j in 0..n {
+                s += a.get(i, j) * x[j];
+            }
+            assert!((s - b[i]).abs() < 1e-8, "row {i}: {s} vs {}", b[i]);
+        }
     }
 
     #[test]

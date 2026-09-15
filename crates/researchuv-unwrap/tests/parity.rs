@@ -26,7 +26,7 @@ fn default_opts() -> PipelineOptions {
 #[test]
 fn cube_produces_six_exact_affine_charts() {
     let (p, f) = meshgen::cube(6);
-    let res = run(p, f, &default_opts());
+    let res = run(p, f, &default_opts()).expect("pipeline run");
 
     // Welded manifold: 8 corners + 60 edge verts + 150 interior = 218.
     assert_eq!(res.mesh.positions.len(), 218);
@@ -76,7 +76,7 @@ fn cube_produces_six_exact_affine_charts() {
 #[test]
 fn sphere_is_one_closed_chart_with_finite_distortion() {
     let (p, f) = meshgen::uv_sphere(48, 24);
-    let res = run(p, f, &default_opts());
+    let res = run(p, f, &default_opts()).expect("pipeline run");
 
     assert_eq!(res.mesh.positions.len(), 1036);
     assert_eq!(res.mesh.faces.len(), 2068);
@@ -115,7 +115,7 @@ fn sphere_is_one_closed_chart_with_finite_distortion() {
 #[test]
 fn torus_annulus_is_one_chart_with_two_borders() {
     let (p, f) = meshgen::torus_annulus(2.0, 0.7, 64, 40);
-    let res = run(p, f, &default_opts());
+    let res = run(p, f, &default_opts()).expect("pipeline run");
 
     assert_eq!(res.mesh.positions.len(), 2560);
     assert_eq!(res.mesh.faces.len(), 4992);
@@ -160,7 +160,7 @@ fn torus_annulus_is_one_chart_with_two_borders() {
 #[test]
 fn closed_torus_is_one_borderless_chart() {
     let (p, f) = meshgen::torus(2.0, 0.7, 64, 40);
-    let res = run(p, f, &default_opts());
+    let res = run(p, f, &default_opts()).expect("pipeline run");
     assert_eq!(res.mesh.faces.len(), 2 * 64 * 40);
     assert_eq!(res.charts.len(), 1);
     assert!(res.charts[0].chart.is_borderless());

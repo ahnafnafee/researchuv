@@ -10,7 +10,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("cube-uv.svg"));
     let (positions, triangles) = meshgen::cube(6);
-    let result = run(positions, triangles, &PipelineOptions::default());
+    let result = run(positions, triangles, &PipelineOptions::default())
+        .expect("the cube fixture must run cleanly");
     if result.placed.iter().any(Option::is_none) {
         return Err("the cube fixture could not be fully packed".into());
     }
