@@ -64,6 +64,25 @@ impl Sparse {
         &self.rows[i]
     }
 
+    /// The leading `limit × limit` block as a CSR triple
+    /// `(values, column indices, row pointers)` — the GPU solver's input.
+    pub fn to_csr(&self, limit: usize) -> (Vec<f64>, Vec<i32>, Vec<i32>) {
+        let n = limit.min(self.n);
+        let mut vals: Vec<f64> = Vec::new();
+        let mut cols: Vec<i32> = Vec::new();
+        let mut row_ptr: Vec<i32> = vec![0];
+        for r in 0..n {
+            for (&c, &v) in &self.rows[r] {
+                if c < limit {
+                    vals.push(v);
+                    cols.push(c as i32);
+                }
+            }
+            row_ptr.push(vals.len() as i32);
+        }
+        (vals, cols, row_ptr)
+    }
+
     /// Approximate minimum-degree column ordering: sort columns by their initial
     /// nonzero count (ties broken by column index). Cheap (`O(nnz + n log n)`) and
     /// effective for the structured systems the driver produces. (SuperLU's own

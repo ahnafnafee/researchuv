@@ -6,13 +6,16 @@
 //! | [`val`] | Named values, attributes, and binary serialization |
 //! | [`app`] | Task registration, configuration, reports, and undo/redo |
 //! | [`io`] | OBJ/STL import, OBJ/STL export, and atlas SVG rendering |
+//! | [`exec`] | Deterministic multi-core stage execution |
 
 pub mod app;
+pub mod exec;
 pub mod io;
 pub mod model;
 pub mod val;
 
 pub use app::{App, Config, DataReport, Edition, Task};
+pub use exec::{par_map, worker_count};
 pub use io::{
     atlas_svg, parse_obj, parse_stl, read_obj, read_stl, write_atlas_svg_file, write_obj,
     write_obj_file, write_stl, write_stl_file, IoError,
