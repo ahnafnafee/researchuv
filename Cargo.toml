@@ -8,6 +8,8 @@ members = [
     "crates/researchuv-api",
     "crates/researchuv-link",
     "crates/researchuv-cli",
+    "crates/researchuv-editor",
+    "crates/researchuv-gpu",
 ]
 
 [workspace.package]

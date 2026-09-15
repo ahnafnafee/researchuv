@@ -53,6 +53,24 @@ pub const KEEP_METRIC: bool = false;
 /// Mix weight init (`0x140F7BB78`).
 pub const MIX_W: f64 = 1.0;
 
+/// Linear-solver backend for the unfold driver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolverBackend {
+    /// The direct sparse LU (default — the reference `dgssv` mirror).
+    Cpu,
+    /// CUDA conjugate gradients on the SPD free block
+    /// ([`researchuv_gpu`]), falling back to the CPU solve when no device
+    /// or PTX is available, the system is too small to be worth the
+    /// transfer, or the solve fails. Identical converged result.
+    Gpu,
+}
+
+impl Default for SolverBackend {
+    fn default() -> Self {
+        SolverBackend::Cpu
+    }
+}
+
 /// Unfold driver options (documented task parameters).
 #[derive(Clone, Copy, Debug)]
 pub struct UnfoldOptions {
@@ -65,6 +83,8 @@ pub struct UnfoldOptions {
     pub target_area: f64,
     /// `mixW` — the slack-row weight (default 1.0).
     pub mix_w: f64,
+    /// The linear-solver backend (default CPU).
+    pub solver: SolverBackend,
 }
 
 impl Default for UnfoldOptions {
@@ -75,6 +95,7 @@ impl Default for UnfoldOptions {
             keep_metric: KEEP_METRIC,
             target_area: 0.0,
             mix_w: MIX_W,
+            solver: SolverBackend::default(),
         }
     }
 }
@@ -437,6 +458,52 @@ pub fn cg_solve(matrix: &Sparse, rhs: &[f64], max_iter: usize) -> Option<Vec<f64
     Some(x)
 }
 
+/// The engine-wide GPU solver (initialized on first use; `None` when CUDA
+/// is unavailable — every GPU request then falls back to the CPU solve).
+static GPU: std::sync::OnceLock<std::sync::Mutex<Option<researchuv_gpu::GpuSolver>>> =
+    std::sync::OnceLock::new();
+
+fn gpu_solver() -> &'static std::sync::Mutex<Option<researchuv_gpu::GpuSolver>> {
+    GPU.get_or_init(|| {
+        let solver = researchuv_gpu::GpuSolver::new();
+        if solver.is_some() {
+            eprintln!("researchuv-gpu: CUDA solver active");
+        }
+        std::sync::Mutex::new(solver)
+    })
+}
+
+/// Below this free-variable count the CPU LU wins (upload + JIT overhead).
+const GPU_MIN_VARS: usize = 1024;
+
+/// Solve the assembled system on the GPU: the SPD free block via CUDA CG,
+/// the decoupled slack variable analytically. `None` when the GPU path is
+/// not applicable (too small, `KeepMetric`'s non-symmetric rows, or no
+/// device) — the caller falls back to the direct LU.
+fn gpu_solve(
+    matrix: &Sparse,
+    rhs: &[f64],
+    nfree: usize,
+    mix_w: f64,
+    max_iter: usize,
+) -> Option<Vec<f64>> {
+    let nvar_free = 2 * nfree;
+    if nvar_free < GPU_MIN_VARS || nvar_free + 1 != rhs.len() || mix_w <= 0.0 {
+        return None;
+    }
+    let (vals, cols, row_ptr) = matrix.to_csr(nvar_free);
+    if vals.is_empty() {
+        return None;
+    }
+    let a = researchuv_gpu::CsrMatrix { vals, cols, row_ptr };
+    let guard = gpu_solver().lock().ok()?;
+    let gpu = guard.as_ref()?;
+    let mut x = gpu.cg_solve(&a, &rhs[..nvar_free], max_iter.max(1024) * 16, 1e-12)?;
+    // Slack row: M[aux][aux] = mix_w, rhs[aux] = mix_w ⇒ slack = 1.
+    x.push(1.0);
+    Some(x)
+}
+
 /// The unfold driver (mirror of `FUN_14034CBB0`).
 ///
 /// Assembles the per-iteration system (conformal rows + slack row + pin rows),
@@ -597,14 +664,20 @@ pub fn unfold_chart(mesh: &SurfaceMesh, chart: &Chart, opts: UnfoldOptions) -> U
         }
 
         // Solve the (symmetric on the free block) free-variable system with the
-        // direct sparse LU — the faithful mirror of the original's SuperLU solve.
+        // direct sparse LU — the faithful mirror of the original's SuperLU solve —
+        // or the CUDA conjugate-gradient backend on the SPD free block (the
+        // KeepMetric area rows are non-symmetric: CPU only).
         let mut m = Sparse::new(nvar);
         for (rr, (&r, &c)) in row.iter().zip(col.iter()).enumerate() {
             if c != usize::MAX {
                 m.add(r, c, val[rr]);
             }
         }
-        let sol = m.solve(&rhs);
+        let sol = if opts.solver == SolverBackend::Gpu && !opts.keep_metric {
+            gpu_solve(&m, &rhs, nfree, opts.mix_w, max_iter).or_else(|| m.solve(&rhs))
+        } else {
+            m.solve(&rhs)
+        };
         let sol = match sol {
             Some(s) => s,
             None => break,
@@ -649,5 +722,39 @@ pub fn unfold_chart(mesh: &SurfaceMesh, chart: &Chart, opts: UnfoldOptions) -> U
         err_accum,
         target,
         area3d: chart.area3d,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_backend_matches_the_cpu_solve() {
+        // Skipped automatically on machines without CUDA.
+        if researchuv_gpu::GpuSolver::new().is_none() {
+            eprintln!("skipping: no CUDA device/PTX available");
+            return;
+        }
+        let (p, f) = crate::meshgen::grid(32, 32);
+        let mesh = crate::weld::weld(p, f, 1e-12);
+        let (charts, _) = crate::segment::segment(&mesh, 30.0);
+        let ch = &charts[0];
+        let cpu = unfold_chart(&mesh, ch, UnfoldOptions::default());
+        let mut gpu_opts = UnfoldOptions::default();
+        gpu_opts.solver = SolverBackend::Gpu;
+        let gpu = unfold_chart(&mesh, ch, gpu_opts);
+        assert_eq!(cpu.uv.len(), gpu.uv.len());
+        let max_diff = cpu
+            .uv
+            .iter()
+            .zip(gpu.uv.iter())
+            .map(|(a, b)| (*a - *b).len())
+            .fold(0.0f64, f64::max);
+        let scale = cpu.uv.iter().map(|p| p.len()).fold(0.0f64, f64::max).max(1e-30);
+        assert!(
+            max_diff / scale < 1e-6,
+            "GPU/CPU solutions diverge: {max_diff} over scale {scale}"
+        );
     }
 }

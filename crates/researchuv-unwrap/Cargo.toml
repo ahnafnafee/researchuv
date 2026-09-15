@@ -13,6 +13,7 @@ repository.workspace = true
 researchuv-math = { path = "../researchuv-math" }
 researchuv-core = { path = "../researchuv-core" }
 researchuv-pack = { path = "../researchuv-pack" }
+researchuv-gpu = { path = "../researchuv-gpu" }
 
 [[bench]]
 name = "pipeline"

@@ -27,6 +27,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "researchuv-editor"
+version = "0.1.0"
+dependencies = [
+ "researchuv-api",
+ "researchuv-core",
+ "researchuv-link",
+]
+
+[[package]]
+name = "researchuv-gpu"
+version = "0.1.0"
+
+[[package]]
 name = "researchuv-link"
 version = "0.1.0"
 dependencies = [
@@ -52,6 +65,7 @@ name = "researchuv-unwrap"
 version = "0.1.0"
 dependencies = [
  "researchuv-core",
+ "researchuv-gpu",
  "researchuv-math",
  "researchuv-pack",
 ]

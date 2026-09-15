@@ -57,8 +57,8 @@ fn main() {
         "researchuv pipeline benchmarks ({rounds} rounds, median, release)\n"
     );
     println!(
-        "{:<16} {:>8} {:>8} {:>9} {:>9} {:>12} {:>12}",
-        "fixture", "verts", "tris", "weld+seg", "unfold", "full(shelf)", "full(islands)"
+        "{:<16} {:>8} {:>8} {:>9} {:>9} {:>11} {:>11} {:>9}",
+        "fixture", "verts", "tris", "weld+seg", "unfold", "full(shelf)", "full(islands)", "full(gpu)"
     );
     for (name, (p, f)) in fixtures() {
         let nv = p.len();
@@ -91,9 +91,17 @@ fn main() {
         let (t_full_islands, _) = time_stage(rounds, || {
             run(p.clone(), f.clone(), &islands_opts).map(|r| r.placed.len()).unwrap_or(0)
         });
+        // CUDA CG solve (charts below the transfer threshold stay on the CPU
+        // LU — the column shows the effective mixed time).
+        let mut gpu_opts = PipelineOptions::default();
+        gpu_opts.packer = Packer::Islands;
+        gpu_opts.unfold.solver = researchuv_unwrap::SolverBackend::Gpu;
+        let (t_full_gpu, _) = time_stage(rounds, || {
+            run(p.clone(), f.clone(), &gpu_opts).map(|r| r.placed.len()).unwrap_or(0)
+        });
         println!(
-            "{:<16} {:>8} {:>8} {:>8.1}s {:>8.1}s {:>11.1}s {:>11.1}s",
-            name, nv, nf, t_ws, t_unfold, t_full_shelf, t_full_islands
+            "{:<16} {:>8} {:>8} {:>8.1}s {:>8.1}s {:>11.1}s {:>11.1}s {:>8.1}s",
+            name, nv, nf, t_ws, t_unfold, t_full_shelf, t_full_islands, t_full_gpu
         );
     }
 }

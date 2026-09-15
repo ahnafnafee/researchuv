@@ -1,0 +1,12 @@
+[package]
+name = "researchuv-gpu"
+description = "CUDA execution for ResearchUV: a conjugate-gradient solver on the GPU via the runtime-loaded driver API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
