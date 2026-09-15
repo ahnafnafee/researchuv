@@ -15,12 +15,16 @@ Build on the individual crates or run the complete unfolding pipeline.
 
 ![Rust 2021](https://img.shields.io/badge/Rust-2021-dc7653?style=flat-square&logo=rust&logoColor=white)
 ![Status: experimental](https://img.shields.io/badge/status-experimental-e5b75e?style=flat-square)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-627f91?style=flat-square)](LICENSE)
 ![Backend: CPU](https://img.shields.io/badge/backend-CPU-4e9a8b?style=flat-square)
 ![Dependencies: workspace only](https://img.shields.io/badge/dependencies-workspace_only-627f91?style=flat-square)
 
 <sub>Seven crates · inspectable algorithms · reproducible mesh fixtures</sub>
 
 </div>
+
+> [!IMPORTANT]
+> **Experimental software.** ResearchUV is an active research prototype. APIs and numerical behavior may change; validate your meshes and UV output before using them in a production workflow.
 
 <br>
 
@@ -42,10 +46,10 @@ Build on the individual crates or run the complete unfolding pipeline.
 
 ## 👋 Quick start
 
-Use a current stable Rust toolchain with Cargo. Access to this private repository is required to clone it.
+Use a current stable Rust toolchain with Cargo.
 
 ```sh
-gh repo clone ahnafnafee/researchuv
+git clone https://github.com/ahnafnafee/researchuv.git
 cd researchuv
 cargo test --workspace --locked --release
 cargo run --locked --release -p researchuv-unwrap --example unwrap_cube -- cube-uv.svg
@@ -190,7 +194,7 @@ Keep changes focused and include a small reproducible mesh when reporting a geom
 
 ## 📄 Licensing
 
-The workspace retains its existing `MIT OR Apache-2.0` package metadata in [Cargo.toml](Cargo.toml). Package publication is disabled while this repository is developed privately.
+Licensed under the [Apache License 2.0](LICENSE).
 
 <div align="right">
 
