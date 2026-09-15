@@ -11,3 +11,4 @@ repository.workspace = true
 
 [dependencies]
 researchuv-math = { path = "../researchuv-math" }
+researchuv-gpu = { path = "../researchuv-gpu" }

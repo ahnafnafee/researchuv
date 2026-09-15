@@ -322,6 +322,9 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
     }
 
     // --- 7: heuristic refinement (time-budgeted stochastic improvement) ---
+    // The GPU multi-restart relocation runs first when a device is present
+    // (one CUDA block per restart); the CPU sampler then improves whichever
+    // layout won, and both stages validate through the same score.
     let mut heuristic = HeuristicStats::default();
     if params.heuristic_enable && advanced_heuristic_active(params, n) {
         let mut flat: Vec<Placed> = placed
@@ -335,6 +338,47 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
                 })
             })
             .collect();
+        if flat.len() >= 2 {
+            if let Some((layout, _score)) = researchuv_gpu::heuristic::refine(
+                &flat
+                    .iter()
+                    .map(|p| researchuv_gpu::LayoutBox {
+                        w: p.box_.width(),
+                        h: p.box_.height(),
+                        x: p.box_.min.u,
+                        y: p.box_.min.v,
+                    })
+                    .collect::<Vec<_>>(),
+                (target.min.u, target.min.v, target.max.u, target.max.v),
+                params.margin,
+                params.seed,
+                24,   // restarts
+                12,   // relocation passes
+                512,  // candidate anchors
+            ) {
+                // Apply the winning restart only if it scores better.
+                let before = crate::heur::packing_score(&flat, &target, params);
+                let candidate: Vec<Placed> = flat
+                    .iter()
+                    .zip(layout.iter())
+                    .map(|(p, b)| {
+                        let mut q = p.clone();
+                        q.transform.tx += b.x - p.box_.min.u;
+                        q.transform.ty += b.y - p.box_.min.v;
+                        q.transform.box_ = Box2::new(
+                            Vec2::new(b.x, b.y),
+                            Vec2::new(b.x + p.box_.width(), b.y + p.box_.height()),
+                        );
+                        q.box_ = q.transform.box_;
+                        q
+                    })
+                    .collect();
+                let after = crate::heur::packing_score(&candidate, &target, params);
+                if after < before {
+                    flat = candidate;
+                }
+            }
+        }
         let stats = heuristic_refine(&shadows, &mut flat, &target, params, &mut rng);
         for p in flat.iter() {
             let idx = p.island_index as usize;
@@ -558,6 +602,43 @@ mod tests {
         let r = pack(&mut v, &p);
         assert_eq!(r.retcode, UvpmRetcode::Warning);
         assert!(!r.validation.overlapping.is_empty());
+    }
+
+    #[test]
+    fn gpu_heuristic_path_keeps_placements_valid() {
+        // With a device present the pipeline routes the heuristic through
+        // the GPU multi-restart pass first; the result must stay valid and
+        // at least as well-scored as a pure-CPU run.
+        if researchuv_gpu::GpuSolver::global().is_none() {
+            eprintln!("skipping: no CUDA device/PTX available");
+            return;
+        }
+        let isls: Vec<Island> = (0..8)
+            .map(|i| {
+                let mut isl = sq(0.0, 0.0, 0.3);
+                isl.verts[0].u += i as f64 * 1e-9; // distinct outlines
+                isl
+            })
+            .collect();
+        let mut p = PackParams::default();
+        p.heuristic_enable = true;
+        p.heuristic_search_time = 0.5;
+        p.seed = 123;
+        let mut v1 = isls.clone();
+        let r1 = pack(&mut v1, &p);
+        assert_eq!(r1.retcode, UvpmRetcode::Success);
+        assert!(r1.placed.iter().all(|t| t.is_some()));
+        assert!(r1.validation.overlapping.is_empty());
+        let target = p.effective_box();
+        for (i, a) in r1.placed.iter().flatten().enumerate() {
+            assert!(target.contains_box_eps(&a.box_, 1e-6), "island {i} outside");
+            for b in r1.placed.iter().flatten().skip(i + 1) {
+                assert!(
+                    !crate::poly::boxes_overlap(&a.box_, &b.box_, -1e-9),
+                    "islands {i} overlap after the GPU heuristic"
+                );
+            }
+        }
     }
 
     #[test]
