@@ -19,6 +19,8 @@
 //! driver boundary requires it. Everything above [`solver`] stays safe.
 
 pub mod amg;
+#[cfg(any(test, feature = "internal-probes"))]
+pub mod amg_test;
 pub mod ffi;
 pub mod heuristic;
 pub mod precond;

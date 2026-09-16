@@ -46,6 +46,8 @@ OPTIONS (unwrap):
     --heuristic <SECONDS>        Enable the heuristic search with a budget.
     --raster <RES>               Rasterizer placement resolution (GPU; 256,
                                  512, 1024 — 0 disables).
+    --tiles <COLS>               Tile targets on the raster path: a grid of
+                                 COLS unit-tile columns, rows added as needed.
     --quiet                      Skip the per-chart table.
 
 OPTIONS (info):
@@ -54,6 +56,10 @@ OPTIONS (info):
 
 Exit codes: 0 success, 1 runtime error, 2 usage error.
 ";
+
+fn researchuv_pack_params_tile_dynamic() -> researchuv_pack::params::TileTargetMode {
+    researchuv_pack::params::TileTargetMode::DynamicTiles
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -171,7 +177,7 @@ fn resolve_source(args: &[String]) -> Result<Option<(Vec<Vec3>, Vec<[u32; 3]>, S
                 a.as_str(),
                 "-o" | "--output" | "--svg" | "--stl" | "--angle" | "--weld" | "--iters" | "--packer"
                     | "--padding" | "--margin" | "--rotation-step" | "--heuristic" | "--threads"
-                    | "--raster"
+                    | "--raster" | "--tiles"
             ) {
                 skip_next = true;
             }
@@ -307,6 +313,13 @@ fn cmd_unwrap(args: &[String]) -> ExitCode {
                 .map(|v| {
                     opts.island_pack.raster_resolution =
                         if v == 0 { 0 } else { v.clamp(64, 4096) / 32 * 32 }
+                }),
+            "--tiles" => value(&mut i)
+                .and_then(|v| v.parse::<u32>().map_err(|e| e.to_string()))
+                .map(|v| {
+                    opts.island_pack.tiles_in_row = v.clamp(1, 100);
+                    opts.island_pack.tile_target =
+                        researchuv_pack_params_tile_dynamic();
                 }),
             "--quiet" => Ok(quiet = true),
             "--fixture" => {

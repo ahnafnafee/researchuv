@@ -62,6 +62,14 @@ pub enum RasterMode {
     SideToSideVert,
     /// Side-to-side horizontal: columns dominate.
     SideToSideHori,
+    /// Tile-major: the row-major tile index dominates; the in-tile corner
+    /// distance breaks ties (fills tile 0 first, overflows rightward).
+    Tiles {
+        /// One tile's side in cells.
+        tile_cells: u32,
+        /// Tile columns in the grid.
+        tile_cols: u32,
+    },
 }
 
 impl RasterMode {
@@ -70,6 +78,21 @@ impl RasterMode {
             RasterMode::Corner => 0,
             RasterMode::SideToSideVert => 1,
             RasterMode::SideToSideHori => 2,
+            RasterMode::Tiles { .. } => 3,
+        }
+    }
+
+    fn tile_cells(self) -> i32 {
+        match self {
+            RasterMode::Tiles { tile_cells, .. } => tile_cells.max(1) as i32,
+            _ => 1,
+        }
+    }
+
+    fn tile_cols(self) -> i32 {
+        match self {
+            RasterMode::Tiles { tile_cols, .. } => tile_cols.max(1) as i32,
+            _ => 1,
         }
     }
 }
@@ -241,6 +264,39 @@ impl RasterState {
         }
     }
 
+    /// Rasterize the tile-boundary lines (one cell thick) into EVERY class
+    /// occupancy grid, so footprint masks cannot straddle tile boundaries.
+    /// `cols × rows` is the tile grid; one tile's side is
+    /// `resolution / cols` cells.
+    pub fn block_tile_boundaries(&mut self, cols: u32, rows: u32) -> bool {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let per_tile = self.resolution / cols.max(rows);
+        let w = self.resolution * cols;
+        let h = self.resolution * rows;
+        // Include the closing edge so masks cannot spill past the last tile
+        // column/row into the state's unused margin.
+        for k in 1..=cols {
+            let x = (k * per_tile) as f64;
+            let ring = vec![(x, 0.0), (x + 1.0, 0.0), (x + 1.0, h as f64), (x, h as f64)];
+            for class in 0..N_CLASSES {
+                if !self.rasterize_ring(&ring, class) {
+                    return false;
+                }
+            }
+        }
+        for k in 1..=rows {
+            let y = (k * per_tile) as f64;
+            let ring = vec![(0.0, y), (w as f64, y), (w as f64, y + 1.0), (0.0, y + 1.0)];
+            for class in 0..N_CLASSES {
+                if !self.rasterize_ring(&ring, class) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Rebuild the dilated table `Q[k][j] = dilate(O_j, r_k)` for every
     /// `j ≤ k`. `radii` carries one texel radius per class.
     pub fn dilate_all(&mut self, radii: &[u32]) -> bool {
@@ -326,6 +382,8 @@ impl RasterState {
         let m_rows = mask.h as i32;
         let n_grids = ptrs.len() as i32;
         let mode_c = mode.code();
+        let tile_cells = mode.tile_cells();
+        let tile_cols = mode.tile_cols();
         let grids = self.table.ptr;
         let msk = mask.buf.ptr;
         let out = self.scores.ptr;
@@ -342,6 +400,8 @@ impl RasterState {
                 (&cand_w) as *const i32 as *mut c_void,
                 (&cand_h) as *const i32 as *mut c_void,
                 (&mode_c) as *const i32 as *mut c_void,
+                (&tile_cells) as *const i32 as *mut c_void,
+                (&tile_cols) as *const i32 as *mut c_void,
                 (&out) as *const u64 as *mut c_void,
             ],
         ) {
@@ -575,6 +635,71 @@ mod tests {
             (lx >= 64 && ly == 0) || (ly >= 64 && lx == 0),
             "large-class candidate got ({lx}, {ly}), expected ≥ 64"
         );
+    }
+
+    #[test]
+    fn tile_major_scoring_fills_tile_zero_then_spills() {
+        if !available() {
+            return;
+        }
+        // A 2×2-tile grid at 256 cells per tile (state = 512×512). Tile
+        // boundaries are blocked; after filling tile 0 with four blocks the
+        // next mask must spill to the next tile in row-major order.
+        let per_tile = 256u32;
+        let mut st = RasterState::new(per_tile * 2).expect("state");
+        assert!(st.reset());
+        assert!(st.block_tile_boundaries(2, 2));
+        assert!(st.rasterize_ring(&square_ring(0.0, 0.0, 100.0), 0));
+        let radii = [1u32, 1, 1, 1];
+        assert!(st.dilate_all(&radii));
+        let mask = DeviceMask::rasterize(&[&square_ring(0.0, 0.0, 100.0)], 100, 100).expect("mask");
+        // Fits beside the block in tile 0 (x = 102).
+        let (x, y, _) = st
+            .find_best(&mask, RasterMode::Tiles { tile_cells: per_tile, tile_cols: 2 }, 0)
+            .expect("fits in tile 0");
+        assert_eq!((x, y), (101, 0), "second block sits right of the first in tile 0");
+        // Fill tile 0 completely (four 100-cell blocks in a 2×2 layout).
+        assert!(st.rasterize_ring(&square_ring(102.0, 0.0, 100.0), 0));
+        assert!(st.rasterize_ring(&square_ring(0.0, 102.0, 100.0), 0));
+        assert!(st.rasterize_ring(&square_ring(102.0, 102.0, 100.0), 0));
+        assert!(st.dilate_all(&radii));
+        let (x2, y2, _) = st
+            .find_best(&mask, RasterMode::Tiles { tile_cells: per_tile, tile_cols: 2 }, 0)
+            .expect("spills out of tile 0");
+        // The boundary line (dilated by r=1) blocks straddling: the anchor
+        // must sit fully inside tile 1 (row-major index 1: right of the
+        // vertical boundary) or tile 2 (below), preferring tile 1.
+        assert!(
+            (x2 >= 258 && x2 + 100 <= 512 && y2 < 158) || (y2 >= 258 && y2 + 100 <= 512 && x2 < 158),
+            "straddles or escapes tiles: ({x2}, {y2})"
+        );
+        assert!(x2 >= 258, "tile-major prefers the row-adjacent tile: ({x2}, {y2})");
+    }
+
+    #[test]
+    fn pipeline_shaped_tile_grid_finds_second_slot() {
+        if !available() {
+            return;
+        }
+        // Mirrors the pipeline fixture: state 1024 (= 4 tiles/side), a
+        // 4×3 tile grid, boundaries blocked, one 235-cell island placed in
+        // tile 0, margin radii from margin 0.003 at grid resolution.
+        let mut st = RasterState::new(1024).expect("state");
+        assert!(st.reset());
+        assert!(st.block_tile_boundaries(4, 3));
+        assert!(st.rasterize_ring(&square_ring(0.0, 0.0, 235.0), 1));
+        let radii = [1u32, 1, 2, 4];
+        assert!(st.dilate_all(&radii));
+        let mask = DeviceMask::rasterize(&[&square_ring(0.0, 0.0, 235.0)], 235, 235).expect("mask");
+        let hit = st.find_best(
+            &mask,
+            RasterMode::Tiles { tile_cells: 256, tile_cols: 4 },
+            1,
+        );
+        assert!(hit.is_some(), "a slot exists in tile 1");
+        let (x, y, _) = hit.unwrap();
+        assert!(x >= 261, "clears the dilated boundary: ({x}, {y})");
+        assert!(x + 235 <= 512, "stays in tile 1: ({x}, {y})");
     }
 
     #[test]

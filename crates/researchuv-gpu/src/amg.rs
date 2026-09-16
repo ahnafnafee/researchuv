@@ -26,6 +26,14 @@ pub const COARSEST: usize = 96;
 /// Damped-Jacobi relaxation factor for the post-smooth.
 pub const OMEGA: f64 = 2.0 / 3.0;
 
+/// The number of top levels running the full K-form (two coarse sweeps
+/// with CG steplengths). Below this the cycle takes its V(1,1) form: the
+/// K-recursion costs 2^level visits per level, and at hierarchy depth ~18
+/// the deepest levels are a few hundred unknowns visited tens of thousands
+/// of times — launch-bound, not work-bound. Two K-levels carry nearly all
+/// of the robustness benefit at ~4x the V-cycle cost.
+pub const K_LEVELS: usize = 2;
+
 /// One level of the hierarchy (all device buffers, sizes in elements).
 pub(crate) struct AmgLevel {
     pub n: usize,
@@ -44,19 +52,24 @@ pub(crate) struct AmgLevel {
     pub d_rc: u64,
     /// This level's correction buffer (n; level 0 writes to the caller's z).
     pub d_e: u64,
+    /// Per-level cycle scratch: `t = A·x`, the running residual `t2`, and
+    /// the prolonged coarse correction `tmp` (the K-cycle's intermediate
+    /// values must survive the nested recursive calls).
+    pub d_t: u64,
+    pub d_t2: u64,
+    pub d_tmp: u64,
     /// Host copy of the operator for the exact coarse solve.
     pub host_op: Option<(Vec<f64>, Vec<i32>, Vec<i32>)>,
     /// Diagonal-only level (aggregation stalled): apply = D⁻¹r.
     pub diag_only: bool,
 }
 
-/// The uploaded hierarchy plus the shared smoothing scratch.
+/// The uploaded hierarchy plus the reusable dot-partials scratch.
 pub(crate) struct DeviceAmg {
     pub levels: Vec<AmgLevel>,
     pub omega: f64,
-    /// Shared fine-sized scratch: `t = A·e` and the smooth residual.
-    pub d_t: u64,
-    pub d_t2: u64,
+    /// Reusable dot-product partials (grown on demand by level size).
+    pub partials: crate::solver::ScratchBuf,
 }
 
 /// Build and upload the hierarchy for `a`.
@@ -115,6 +128,9 @@ pub(crate) fn build(mem: &mut DeviceMem, c: &Cuda, a: &CsrMatrix) -> Option<Devi
             (d_agg, d_members, d_m_ptr, d_rc)
         };
         let d_e = mem.alloc_f64(c, n)?;
+        let d_t = mem.alloc_f64(c, n)?;
+        let d_t2 = mem.alloc_f64(c, n)?;
+        let d_tmp = mem.alloc_f64(c, n)?;
         let host_op = if coarsest && !diag_only {
             Some((cur.vals.clone(), cur.cols.clone(), cur.row_ptr.clone()))
         } else {
@@ -132,6 +148,9 @@ pub(crate) fn build(mem: &mut DeviceMem, c: &Cuda, a: &CsrMatrix) -> Option<Devi
             d_m_ptr,
             d_rc,
             d_e,
+            d_t,
+            d_t2,
+            d_tmp,
             host_op,
             diag_only,
         });
@@ -143,9 +162,7 @@ pub(crate) fn build(mem: &mut DeviceMem, c: &Cuda, a: &CsrMatrix) -> Option<Devi
             return None; // pathological depth guard
         }
     }
-    let d_t = mem.alloc_f64(c, n_fine)?;
-    let d_t2 = mem.alloc_f64(c, n_fine)?;
-    Some(DeviceAmg { levels, omega: OMEGA, d_t, d_t2 })
+    Some(DeviceAmg { levels, omega: OMEGA, partials: crate::solver::ScratchBuf::default() })
 }
 
 /// Pairwise matched aggregation: vertex order scan, strongest unmatched
@@ -158,13 +175,20 @@ fn aggregate(a: &CsrMatrix) -> (Vec<i32>, usize) {
         if agg[v] != -1 {
             continue;
         }
+        // Candidates in ascending column order: the tie-break (first
+        // strictly-strongest wins) must not depend on the caller's CSR
+        // insertion order.
+        let mut cands: Vec<(usize, f64)> = a
+            .row(v)
+            .filter(|(c, _)| *c as usize != v)
+            .map(|(c, val)| (c as usize, val.abs()))
+            .collect();
+        cands.sort_unstable_by_key(|(u, _)| *u);
         let mut best: Option<(f64, usize)> = None;
-        for (cu, val) in a.row(v) {
-            let u = cu as usize;
-            if u == v || agg[u] != -1 {
+        for (u, s) in cands {
+            if agg[u] != -1 {
                 continue;
             }
-            let s = val.abs();
             match best {
                 Some((bs, _)) if s <= bs => {}
                 _ => best = Some((s, u)),
@@ -203,11 +227,85 @@ fn galerkin(a: &CsrMatrix, agg: &[i32], n_coarse: usize) -> Option<CsrMatrix> {
     Some(CsrMatrix { vals, cols, row_ptr })
 }
 
-/// One V-cycle: `out = M⁻¹ r_in` at `lvl`. Returns false on driver failure.
-pub(crate) fn apply(s: &GpuSolver, amg: &DeviceAmg, lvl: usize, d_r_in: u64, d_out: u64) -> bool {
+/// A borrowed view of one level's device operands (copied to locals so the
+/// K-cycle's recursive `&mut` calls don't fight the borrow checker).
+struct LevelRef {
+    n: usize,
+    #[allow(dead_code)]
+    n_coarse: usize,
+    d_vals: u64,
+    d_cols: u64,
+    d_ptr: u64,
+    d_inv_diag: u64,
+    #[allow(dead_code)]
+    d_agg: u64,
+    #[allow(dead_code)]
+    d_members: u64,
+    #[allow(dead_code)]
+    d_m_ptr: u64,
+    #[allow(dead_code)]
+    d_rc: u64,
+    d_t: u64,
+    d_t2: u64,
+    d_tmp: u64,
+    diag_only: bool,
+    has_host_op: bool,
+}
+
+/// One K-cycle: `out = M⁻¹ r_in` at `lvl` (Notay's recursive
+/// preconditioner). Returns false on driver failure.
+///
+/// Per level: pre-smooth from zero, then **two** coarse corrections, each
+/// followed by a CG-style steplength `β = (r·r)/(r·A·y)` (guarded — a
+/// non-positive denominator skips the update), then one post-smooth. The
+/// steplengths are what make the recursion robust for unsmoothed
+/// aggregation, where the plain V-cycle stagnates on near-singular systems;
+/// the cost is one extra coarse sweep per level. Every reduction is
+/// single-thread-per-row or block-deterministic: the cycle is bitwise
+/// reproducible.
+pub(crate) fn apply(s: &GpuSolver, amg: &mut DeviceAmg, lvl: usize, d_r_in: u64, d_out: u64) -> bool {
     let c = &s.cuda;
     #[allow(non_snake_case)]
-    let L = &amg.levels[lvl];
+    let L = {
+        let l = &amg.levels[lvl];
+        (
+            l.n,
+            l.n_coarse,
+            l.d_vals,
+            l.d_cols,
+            l.d_ptr,
+            l.d_inv_diag,
+            l.d_agg,
+            l.d_members,
+            l.d_m_ptr,
+            l.d_rc,
+            l.d_e,
+            l.d_t,
+            l.d_t2,
+            l.d_tmp,
+            l.diag_only,
+            l.host_op.is_some(),
+        )
+    };
+    let (n, n_coarse, d_vals, d_cols, d_ptr, d_inv_diag, d_agg, d_members, d_m_ptr, d_rc, _d_e, d_t, d_t2, d_tmp, diag_only, has_host_op) = L;
+    #[allow(non_snake_case)]
+    let L = LevelRef {
+        n,
+        n_coarse,
+        d_vals,
+        d_cols,
+        d_ptr,
+        d_inv_diag,
+        d_agg,
+        d_members,
+        d_m_ptr,
+        d_rc,
+        d_t,
+        d_t2,
+        d_tmp,
+        diag_only,
+        has_host_op,
+    };
     let launch = |f: crate::ffi::CUfunction, n: usize, params: &mut [*mut c_void]| unsafe {
         (c.cuLaunchKernel)(
             f,
@@ -226,141 +324,162 @@ pub(crate) fn apply(s: &GpuSolver, amg: &DeviceAmg, lvl: usize, d_r_in: u64, d_o
     let p_u64 = |v: &u64| v as *const u64 as *mut c_void;
     let p_i32 = |v: &i32| v as *const i32 as *mut c_void;
     let p_f64 = |v: &f64| v as *const f64 as *mut c_void;
+    let (t, t2) = (L.d_t, L.d_t2);
 
     if L.diag_only {
         let n_i = L.n as i32;
         return launch(s.k_mul, L.n, &mut [p_u64(&L.d_inv_diag), p_u64(&d_r_in), p_u64(&d_out), p_i32(&n_i)]);
     }
-    if L.host_op.is_some() {
-        return coarse_exact(s, L, d_r_in, d_out);
+    if L.has_host_op {
+        return coarse_exact(s, lvl, &amg.levels[lvl], d_r_in, d_out);
     }
-    // Symmetric V(1,1) cycle: pre-smooth from zero, coarse-correct the
-    // refreshed residual, post-smooth. (A single post-smooth — the V(0,1)
-    // form — stalls on near-singular Poisson systems; V(1,1) with the same
-    // damped-Jacobi sweep is the standard fix and keeps the preconditioner
-    // symmetric for CG.)
     let n_i = L.n as i32;
-    // e = ω·D⁻¹ r   (pre-smooth from e = 0).
+    let om = amg.omega;
+    let m1 = -1.0f64;
+
+    // A helper closure set over this level's fixed operands.
+    let spmv_into = |dst: u64, src: u64| -> bool {
+        launch(
+            s.k_spmv,
+            L.n,
+            &mut [
+                p_u64(&L.d_vals),
+                p_u64(&L.d_cols),
+                p_u64(&L.d_ptr),
+                p_u64(&src),
+                p_u64(&dst),
+                p_i32(&n_i),
+            ],
+        )
+    };
+
+    // 1. Pre-smooth from zero: out = ω·D⁻¹ r.
     if !launch(s.k_fill0, L.n, &mut [p_u64(&d_out), p_i32(&n_i)]) {
         return false;
     }
     if !launch(
         s.k_mul,
         L.n,
-        &mut [p_u64(&L.d_inv_diag), p_u64(&d_r_in), p_u64(&amg.d_t), p_i32(&n_i)],
+        &mut [p_u64(&L.d_inv_diag), p_u64(&d_r_in), p_u64(&t), p_i32(&n_i)],
     ) {
         return false;
     }
-    let om = amg.omega;
-    if !launch(
-        s.k_axpy,
-        L.n,
-        &mut [p_f64(&om), p_u64(&amg.d_t), p_u64(&d_out), p_i32(&n_i)],
-    ) {
+    if !launch(s.k_axpy, L.n, &mut [p_f64(&om), p_u64(&t), p_u64(&d_out), p_i32(&n_i)]) {
         return false;
     }
-    // t2 = r − A·e; restrict into r_c.
-    if !launch(
-        s.k_spmv,
-        L.n,
-        &mut [
-            p_u64(&L.d_vals),
-            p_u64(&L.d_cols),
-            p_u64(&L.d_ptr),
-            p_u64(&d_out),
-            p_u64(&amg.d_t),
-            p_i32(&n_i),
-        ],
-    ) {
+    // 2. r1 = r − A·out → t2.
+    if !spmv_into(t, d_out) {
         return false;
     }
-    if !launch(s.k_copy, L.n, &mut [p_u64(&amg.d_t2), p_u64(&d_r_in), p_i32(&n_i)]) {
+    if !launch(s.k_copy, L.n, &mut [p_u64(&t2), p_u64(&d_r_in), p_i32(&n_i)]) {
         return false;
     }
-    let m1 = -1.0f64;
-    if !launch(
-        s.k_axpy,
-        L.n,
-        &mut [p_f64(&m1), p_u64(&amg.d_t), p_u64(&amg.d_t2), p_i32(&n_i)],
-    ) {
+    if !launch(s.k_axpy, L.n, &mut [p_f64(&m1), p_u64(&t), p_u64(&t2), p_i32(&n_i)]) {
         return false;
     }
-    let n_agg = L.n_coarse as i32;
-    if !launch(
-        s.k_agg,
-        L.n_coarse,
-        &mut [
-            p_u64(&amg.d_t2),
-            p_u64(&L.d_rc),
-            p_u64(&L.d_members),
-            p_u64(&L.d_m_ptr),
-            p_i32(&n_agg),
-        ],
-    ) {
+    // 3-4. Coarse correction #1 with a CG steplength.
+    let coarse_step = |amg: &mut DeviceAmg, resid: u64| -> bool {
+        let n_agg = n_coarse as i32;
+        if !launch(
+            s.k_agg,
+            n_coarse,
+            &mut [
+                p_u64(&resid),
+                p_u64(&d_rc),
+                p_u64(&d_members),
+                p_u64(&d_m_ptr),
+                p_i32(&n_agg),
+            ],
+        ) {
+            return false;
+        }
+        let coarse_e = amg.levels[lvl + 1].d_e;
+        if !apply(s, amg, lvl + 1, d_rc, coarse_e) {
+            return false;
+        }
+        launch(
+            s.k_gather,
+            n,
+            &mut [p_u64(&d_tmp), p_u64(&coarse_e), p_u64(&d_agg), p_i32(&n_i)],
+        )
+    };
+    // The V(1,1) tail: one coarse correction, no steplength, post-smooth.
+    if lvl >= K_LEVELS {
+        if !coarse_step(amg, t2) {
+            return false;
+        }
+        let one = 1.0f64;
+        if !launch(s.k_axpy, L.n, &mut [p_f64(&one), p_u64(&L.d_tmp), p_u64(&d_out), p_i32(&n_i)]) {
+            return false;
+        }
+        if !spmv_into(L.d_t, d_out) {
+            return false;
+        }
+        if !launch(s.k_copy, L.n, &mut [p_u64(&L.d_t2), p_u64(&d_r_in), p_i32(&n_i)]) {
+            return false;
+        }
+        if !launch(s.k_axpy, L.n, &mut [p_f64(&m1), p_u64(&L.d_t), p_u64(&L.d_t2), p_i32(&n_i)]) {
+            return false;
+        }
+        if !launch(
+            s.k_mul,
+            L.n,
+            &mut [p_u64(&L.d_inv_diag), p_u64(&L.d_t2), p_u64(&L.d_t), p_i32(&n_i)],
+        ) {
+            return false;
+        }
+        return launch(s.k_axpy, L.n, &mut [p_f64(&om), p_u64(&L.d_t), p_u64(&d_out), p_i32(&n_i)]);
+    }
+
+    if !coarse_step(amg, t2) {
         return false;
     }
-    // Recurse on the coarse level; prolong ADDS into e (gather → t, e += t).
-    let coarse_e = amg.levels[lvl + 1].d_e;
-    if !apply(s, amg, lvl + 1, L.d_rc, coarse_e) {
+    // denom = (r1·A y1) via t; numer = (r1·r1).
+    if !spmv_into(t, L.d_tmp) {
         return false;
     }
-    if !launch(
-        s.k_gather,
-        L.n,
-        &mut [p_u64(&amg.d_t), p_u64(&coarse_e), p_u64(&L.d_agg), p_i32(&n_i)],
-    ) {
+    let (num1, den1) = match (s.dot_s(&mut amg.partials, t2, t2, L.n), s.dot_s(&mut amg.partials, t2, t, L.n)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return false,
+    };
+    if den1 > 1e-300 {
+        let beta = num1 / den1;
+        if !launch(s.k_axpy, L.n, &mut [p_f64(&beta), p_u64(&L.d_tmp), p_u64(&d_out), p_i32(&n_i)]) {
+            return false;
+        }
+        // r2 = r1 − β·A y1 (reuse t2; t already holds A y1).
+        if !launch(s.k_axpy, L.n, &mut [p_f64(&-beta), p_u64(&t), p_u64(&t2), p_i32(&n_i)]) {
+            return false;
+        }
+    }
+    // 5-6. Coarse correction #2 on the updated residual.
+    if !coarse_step(amg, t2) {
         return false;
     }
-    let one = 1.0f64;
-    if !launch(
-        s.k_axpy,
-        L.n,
-        &mut [p_f64(&one), p_u64(&amg.d_t), p_u64(&d_out), p_i32(&n_i)],
-    ) {
+    if !spmv_into(t, L.d_tmp) {
         return false;
     }
-    // Post-smooth: e += ω·D⁻¹(r − A·e).
-    if !launch(
-        s.k_spmv,
-        L.n,
-        &mut [
-            p_u64(&L.d_vals),
-            p_u64(&L.d_cols),
-            p_u64(&L.d_ptr),
-            p_u64(&d_out),
-            p_u64(&amg.d_t),
-            p_i32(&n_i),
-        ],
-    ) {
-        return false;
+    let (num2, den2) = match (s.dot_s(&mut amg.partials, t2, t2, L.n), s.dot_s(&mut amg.partials, t2, t, L.n)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return false,
+    };
+    if den2 > 1e-300 {
+        let beta = num2 / den2;
+        if !launch(s.k_axpy, L.n, &mut [p_f64(&beta), p_u64(&L.d_tmp), p_u64(&d_out), p_i32(&n_i)]) {
+            return false;
+        }
     }
-    if !launch(s.k_copy, L.n, &mut [p_u64(&amg.d_t2), p_u64(&d_r_in), p_i32(&n_i)]) {
-        return false;
-    }
-    if !launch(
-        s.k_axpy,
-        L.n,
-        &mut [p_f64(&m1), p_u64(&amg.d_t), p_u64(&amg.d_t2), p_i32(&n_i)],
-    ) {
-        return false;
-    }
-    if !launch(
-        s.k_mul,
-        L.n,
-        &mut [p_u64(&L.d_inv_diag), p_u64(&amg.d_t2), p_u64(&amg.d_t), p_i32(&n_i)],
-    ) {
-        return false;
-    }
-    launch(
-        s.k_axpy,
-        L.n,
-        &mut [p_f64(&om), p_u64(&amg.d_t), p_u64(&d_out), p_i32(&n_i)],
-    )
+    // Notay's K-form ends here: NO post-smooth inside the K-level (the
+    // steplength-conjugated coarse corrections close the level; adding a
+    // smoothing sweep after them breaks the recursion's guaranteed
+    // positivity — verified empirically: FCG + K-with-post-smooth
+    // stagnates on Poisson where the plain form converges).
+    true
 }
 
 /// Exact coarse solve on the host (dense Cholesky of the small operator).
 #[allow(non_snake_case)]
-fn coarse_exact(s: &GpuSolver, L: &AmgLevel, d_r: u64, d_out: u64) -> bool {
+pub(crate) fn coarse_exact(s: &GpuSolver, _lvl: usize, L: &AmgLevel, d_r: u64, d_out: u64) -> bool {
     let c = &s.cuda;
     let n = L.n;
     let (vals, cols, ptr) = L.host_op.as_ref().expect("coarsest carries its operator");

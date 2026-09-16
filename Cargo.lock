@@ -16,6 +16,7 @@ dependencies = [
  "researchuv-api",
  "researchuv-core",
  "researchuv-math",
+ "researchuv-pack",
  "researchuv-unwrap",
 ]
 

@@ -320,7 +320,8 @@ __global__ void rst_find_best(const unsigned long long* __restrict__ grid_ptrs,
                               const unsigned int* __restrict__ mask,
                               int g_words, int m_words, int m_rows,
                               int cand_w, int cand_h,
-                              int mode, double* scores) {
+                              int mode, int tile_cells, int tile_cols,
+                              double* scores) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= cand_w * cand_h) {
         return;
@@ -351,7 +352,15 @@ __global__ void rst_find_best(const unsigned long long* __restrict__ grid_ptrs,
     double score;
     if (mode == 1) score = 1e6 * (double)y + (double)x;
     else if (mode == 2) score = 1e6 * (double)x + (double)y;
-    else score = (double)x + (double)y;
+    else if (mode == 3) {
+        // Tile-major: row-major tile index dominates, the in-tile corner
+        // distance breaks ties. `tile_cells` is one tile's side in cells.
+        int tx = x / tile_cells;
+        int ty = y / tile_cells;
+        int in_x = x - tx * tile_cells;
+        int in_y = y - ty * tile_cells;
+        score = 1e6 * (double)(ty * tile_cols + tx) + (double)(in_x + in_y);
+    } else score = (double)x + (double)y;
     scores[t] = ok ? score : 1e300;
 }
 

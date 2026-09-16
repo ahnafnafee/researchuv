@@ -66,6 +66,7 @@ pub mod params;
 pub mod pipeline;
 pub mod place;
 pub mod raster;
+pub mod tiles;
 pub mod poly;
 pub mod rng;
 pub mod similarity;

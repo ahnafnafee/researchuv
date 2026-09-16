@@ -18,6 +18,7 @@ researchuv-core = { path = "../researchuv-core" }
 researchuv-unwrap = { path = "../researchuv-unwrap" }
 researchuv-api = { path = "../researchuv-api" }
 researchuv-math = { path = "../researchuv-math" }
+researchuv-pack = { path = "../researchuv-pack" }
 
 [dev-dependencies]
 researchuv-core = { path = "../researchuv-core" }

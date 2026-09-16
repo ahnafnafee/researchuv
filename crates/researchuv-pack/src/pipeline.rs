@@ -291,18 +291,39 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
     }
 
     // The rasterizer placement path (GPU occupancy grid). Created once;
-    // fixed islands seed the grid, each placed island joins it.
+    // fixed islands seed the grid, each placed island joins it. Tile
+    // targets are rasterizer-native: the grid spans the whole tile grid.
+    let raster_tiles = if params.raster_resolution > 0
+        && params.tile_target != crate::params::TileTargetMode::DynamicTiles || (params.raster_resolution > 0 && params.tiles_in_row != 10)
+    {
+        let total_area: f64 = shadows.iter().map(|i| i.bbox.width() * i.bbox.height()).sum();
+        Some(crate::tiles::TileGrid::from_params(params, total_area, target.max_extent()))
+    } else {
+        None
+    };
+    let raster_region = match raster_tiles {
+        Some(tg) => tg.box_(),
+        None => target,
+    };
     let mut raster_state = if params.raster_resolution > 0 {
-        match researchuv_gpu::RasterState::new(params.raster_resolution) {
+        match researchuv_gpu::RasterState::new(
+            params.raster_resolution
+                * raster_tiles.map(|t| t.cols.max(t.rows)).unwrap_or(1),
+        ) {
             Some(mut st) => {
-                if !st.reset() {
+                let boundaries_ok = st.reset()
+                    && match raster_tiles {
+                        Some(tg) => st.block_tile_boundaries(tg.cols, tg.rows),
+                        None => true,
+                    };
+                if !boundaries_ok {
                     None
                 } else {
                     // Fixed islands are part of the free space.
                     let mut ok = true;
                     for p in placed_any.iter() {
                         let isl = &shadows[p.island_index as usize];
-                        if crate::raster::rasterize_placed(&mut st, isl, &p.transform, &target)
+                        if crate::raster::rasterize_placed(&mut st, isl, &p.transform, &raster_region, raster_tiles)
                             .is_none()
                         {
                             ok = false;
@@ -335,7 +356,7 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
             }
             // MaxScale: the uniform grid-quantized fit.
             crate::params::ScaleMode::MaxScale => {
-                crate::raster::fit_scale(&shadows, &movable, &target, params.margin)
+                crate::raster::fit_scale(&shadows, &movable, &raster_region, params.margin)
             }
         }
     } else {
@@ -355,13 +376,21 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
         // Raster path first; the exact planner is the fallback.
         let raster_hit = match raster_state.as_mut() {
             Some(st) if !params.grouping.groups_together => {
-                match crate::raster::find_placement_raster(st, isl, &region, params, raster_fit) {
+                match crate::raster::find_placement_raster(
+                            st,
+                            isl,
+                            &raster_region,
+                            params,
+                            raster_fit,
+                            raster_tiles,
+                        ) {
                     Some(mut pl) => {
                         let t = compose_transform(&pl.transform, &base_t);
                         pl.island_index = i as u32;
                         placed_any.push(pl.clone());
                         placed[i] = Some(t);
-                        let ok = crate::raster::rasterize_placed(st, isl, &t, &region).is_some();
+                        let ok =
+                            crate::raster::rasterize_placed(st, isl, &t, &raster_region, raster_tiles).is_some();
                         if ok {
                             Some(())
                         } else {
@@ -514,6 +543,37 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
         .collect();
     let mut validation =
         validate::validate_islands(islands, &outlines, &placed_holes, &target, params);
+    // Tile placements live on the tile grid: a box inside ANY tile is not
+    // "outside the target" (only boxes beyond the whole grid are).
+    if let Some(tg) = raster_tiles {
+        let in_some_tile = |b: &Box2| -> bool {
+            (0..tg.cols).any(|ix| (0..tg.rows).any(|iy| {
+                let tb = tg.tile_box(ix, iy);
+                tb.contains_box_eps(b, 1e-9)
+            }))
+        };
+        validation.outside.retain(|&i| {
+            let inside = placed[i as usize]
+                .as_ref()
+                .map(|t| in_some_tile(&t.box_))
+                .unwrap_or(false);
+            if inside {
+                islands[i as usize].flags &= !OUTSIDE_TARGET_BOX;
+            }
+            !inside
+        });
+        if validation.outside.is_empty()
+            && validation.retcode == UvpmRetcode::NoSpace
+            && validation.self_intersecting.is_empty()
+        {
+            validation.retcode = if validation.overlapping.is_empty() {
+                UvpmRetcode::Success
+            } else {
+                UvpmRetcode::Warning
+            };
+        }
+    }
+
     // Non-packed islands (arranged outside the target) are exempt from the
     // OUTSIDE_TARGET_BOX error.
     if !non_packed.is_empty() {
@@ -744,6 +804,55 @@ mod tests {
         let target = p.effective_box();
         for (i, a) in r.placed.iter().flatten().enumerate() {
             assert!(target.contains_box_eps(&a.box_, 1e-6), "strip {i} outside: {:?}", a.box_);
+        }
+    }
+
+    #[test]
+    fn raster_tile_targets_spill_across_tiles() {
+        if researchuv_gpu::GpuSolver::global().is_none() {
+            eprintln!("skipping: no CUDA device/PTX available");
+            return;
+        }
+        // 12 unit squares at MaxScale: 9 fit one unit tile's 85% budget, so
+        // the placement must spill to later tiles. DynamicTiles with 4
+        // columns → a 4×1 grid; every box must sit inside SOME tile.
+        let isls: Vec<Island> = (0..12)
+            .map(|i| {
+                let mut isl = sq(0.0, 0.0, 1.0);
+                isl.verts[0].u += i as f64 * 1e-9;
+                isl
+            })
+            .collect();
+        let mut p = PackParams::default();
+        p.raster_resolution = 256;
+        p.tile_target = crate::params::TileTargetMode::DynamicTiles;
+        p.tiles_in_row = 4;
+        let mut v1 = isls.clone();
+        let r = pack(&mut v1, &p);
+        assert!(
+            r.placed.iter().all(|t| t.is_some()),
+            "all 12 islands placed: {:?}",
+            r.placed.iter().map(|t| t.is_some()).collect::<Vec<_>>()
+        );
+        assert!(r.validation.overlapping.is_empty(), "{:?}", r.validation.overlapping);
+        assert_eq!(r.retcode, UvpmRetcode::Success, "tiles validate");
+        // Boxes cover more than one unit tile horizontally.
+        let max_u = r
+            .placed
+            .iter()
+            .flatten()
+            .map(|t| t.box_.max.u)
+            .fold(0.0, f64::max);
+        assert!(max_u > 1.5, "spilled across tiles: max u = {max_u}");
+        // Each box fits within one whole tile.
+        for (i, t) in r.placed.iter().flatten().enumerate() {
+            let ix = t.box_.min.u.floor() as u32;
+            let iy = t.box_.min.v.floor() as u32;
+            let tb = Box2::new(
+                Vec2::new(ix as f64, iy as f64),
+                Vec2::new((ix + 1) as f64, (iy + 1) as f64),
+            );
+            assert!(tb.contains_box_eps(&t.box_, 1e-6), "island {i} crosses a tile boundary: {:?}", t.box_);
         }
     }
 

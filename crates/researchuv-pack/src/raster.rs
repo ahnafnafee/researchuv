@@ -95,18 +95,45 @@ pub fn find_placement_raster(
     region: &Box2,
     params: &PackParams,
     fit_scale: f64,
+    tiles: Option<crate::tiles::TileGrid>,
 ) -> Option<Placed> {
     let res = st.resolution as f64;
+    // With tiles, `region` is the whole tile-grid box and one resolution
+    // spans ONE tile side; without tiles it spans the region's larger side.
     let ext = region.max_extent().max(1e-30);
-    let k = res / ext; // UV → cells
+    // With tiles the square state spans max(cols, rows) tiles per side at
+    // `resolution / max(cols, rows)` cells per tile; one UV unit is one
+    // tile side, so cells-per-UV-unit = per-tile cells.
+    let k = match tiles {
+        Some(tg) => (st.resolution / tg.cols.max(tg.rows)).max(1) as f64,
+        None => res / ext,
+    };
     let origin = region.min;
     let fit_scale = fit_scale.max(1e-9);
-    let mode = match crate::place::effective_strategy(params) {
-        PackStrategy::SideToSideVert => researchuv_gpu::RasterMode::SideToSideVert,
-        PackStrategy::SideToSideHori => researchuv_gpu::RasterMode::SideToSideHori,
-        PackStrategy::Square | PackStrategy::Automatic => researchuv_gpu::RasterMode::Corner,
+    let mode = match tiles {
+        Some(tg) => researchuv_gpu::RasterMode::Tiles {
+            // The raster grid spans per_tile × cols cells; one tile's side
+            // in cells is therefore resolution / cols.
+            tile_cells: (st.resolution / tg.cols.max(1)).max(1),
+            tile_cols: tg.cols,
+        },
+        None => match crate::place::effective_strategy(params) {
+            PackStrategy::SideToSideVert => researchuv_gpu::RasterMode::SideToSideVert,
+            PackStrategy::SideToSideHori => researchuv_gpu::RasterMode::SideToSideHori,
+            PackStrategy::Square | PackStrategy::Automatic => researchuv_gpu::RasterMode::Corner,
+        },
     };
-    let class = class_of(island, fit_scale, region);
+    // The extent class is relative to ONE TILE (the margin grids' E_j
+    // bounds are fractions of a tile side), not the whole tile grid.
+    let class = match tiles {
+        Some(tg) => {
+            let per_tile_extent = region.max_extent() / tg.cols.max(tg.rows) as f64;
+            researchuv_gpu::extent_class(
+                island.bbox.max_extent() * fit_scale / per_tile_extent.max(1e-30),
+            )
+        }
+        None => class_of(island, fit_scale, region),
+    };
     let radii = margin_radii(params.margin, st.resolution);
     if !st.dilate_all(&radii) {
         return None;
@@ -159,12 +186,25 @@ pub fn rasterize_placed(
     island: &Island,
     transform: &PlacedTransform,
     region: &Box2,
+    tiles: Option<crate::tiles::TileGrid>,
 ) -> Option<usize> {
     let res = st.resolution as f64;
     let ext = region.max_extent().max(1e-30);
-    let k = res / ext;
+    // Tiled: one UV unit = one tile side = resolution / side tiles cells.
+    let k = match tiles {
+        Some(tg) => (st.resolution / tg.cols.max(tg.rows)).max(1) as f64,
+        None => res / ext,
+    };
     let origin = region.min;
-    let class = class_of(island, transform.scale, region);
+    let class = match tiles {
+        Some(tg) => {
+            let per_tile = region.max_extent() / tg.cols.max(tg.rows) as f64;
+            researchuv_gpu::extent_class(
+                island.bbox.max_extent() * transform.scale / per_tile.max(1e-30),
+            )
+        }
+        None => class_of(island, transform.scale, region),
+    };
     let cell_pts: Vec<(f64, f64)> = island
         .verts
         .iter()
