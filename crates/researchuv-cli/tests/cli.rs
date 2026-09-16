@@ -129,6 +129,41 @@ fn shelf_packer_flag_is_honored() {
 }
 
 #[test]
+fn raster_flag_produces_a_valid_atlas() {
+    // GPU-dependent: on machines without a device the pipeline falls back
+    // to the exact planner and the run still succeeds.
+    let obj = tmp("cli-raster.obj");
+    let out = bin()
+        .args([
+            "unwrap",
+            "--fixture",
+            "cube",
+            "4",
+            "--packer",
+            "islands",
+            "--raster",
+            "256",
+            "--quiet",
+            "-o",
+        ])
+        .arg(&obj)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}
+stdout: {}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let text = std::fs::read_to_string(&obj).unwrap();
+    assert!(text.contains("vt "), "OBJ carries UVs");
+    let (p, f) = researchuv_core::io::parse_obj(&text).unwrap();
+    assert_eq!(p.len(), 98);
+    assert_eq!(f.len(), 192);
+}
+
+#[test]
 fn missing_input_is_a_usage_error() {
     let out = bin().arg("unwrap").output().unwrap();
     assert_eq!(out.status.code(), Some(2));

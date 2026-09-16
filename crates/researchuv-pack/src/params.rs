@@ -666,6 +666,11 @@ pub struct PackParams {
     // --- strategy / tiling ---
     /// Pack strategy (default Automatic).
     pub pack_strategy: PackStrategy,
+    /// Free-space rasterizer resolution (texels on the target's larger
+    /// side). `0` (default) uses the exact placement planner; a multiple of
+    /// 32 (256–1024 recommended, a GPU required) switches the movable
+    /// placement stage to the occupancy-grid search.
+    pub raster_resolution: u32,
     /// Strategy start corner (default BL).
     pub start_corner: BoxCorner,
     /// Pack everything into a single box (default false).
@@ -762,6 +767,7 @@ impl Default for PackParams {
             target_box: TargetBox::Unit,
             non_square_packing: 1.0,
             pack_strategy: PackStrategy::default(),
+            raster_resolution: 0,
             start_corner: BoxCorner::Bl,
             pack_to_single_box: false,
             tile_target: TileTargetMode::default(),

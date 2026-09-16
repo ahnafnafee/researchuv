@@ -65,6 +65,7 @@ pub mod island;
 pub mod params;
 pub mod pipeline;
 pub mod place;
+pub mod raster;
 pub mod poly;
 pub mod rng;
 pub mod similarity;
@@ -82,6 +83,7 @@ pub use params::{
     TexelDensityUnit, TileFillingMethod, TileTargetMode, UvpmAxis, UvpmFeatureCode, UvpmRetcode,
 };
 pub use pipeline::{pack, PackResult};
+pub use raster::{find_placement_raster, rasterize_placed};
 pub use rng::SplitMix64;
 pub use similarity::{align_similar, find_similar, is_similar, split_by_similarity};
 pub use tdensity::{set_tdensity, TexelDensityParams, TexelDensityPolicy};

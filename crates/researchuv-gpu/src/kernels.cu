@@ -236,4 +236,117 @@ __global__ void heuristic_restarts(const double* __restrict__ w,
     if (tid == 0) scores[r] = sh_score[0];
 }
 
+// ---- Free-space rasterizer packer ------------------------------------------------------
+
+// Rasterize one polygon ring into a bitmask with even-odd scanline fill.
+// One thread per (row, word) of the target; points are in cell coordinates
+// relative to the target origin. Rings XOR-accumulate, so outer + hole
+// rings compose to the correct even-odd coverage.
+__global__ void rst_raster(const double* __restrict__ px,
+                           const double* __restrict__ py,
+                           int npts,
+                           unsigned int* out,
+                           int words_per_row, int rows) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= words_per_row * rows) return;
+    int word = t % words_per_row;
+    int y = t / words_per_row;
+    double yc = y + 0.5;
+    unsigned int bits = 0;
+    for (int b = 0; b < 32; ++b) {
+        double xc = word * 32 + b + 0.5;
+        int parity = 0;
+        for (int e = 0; e < npts; ++e) {
+            int e2 = (e + 1 == npts) ? 0 : e + 1;
+            double ya = py[e], yb = py[e2];
+            if ((ya <= yc && yc < yb) || (yb <= yc && yc < ya)) {
+                double xa = px[e], xb = px[e2];
+                double xi = xa + (yc - ya) * (xb - xa) / (yb - ya);
+                if (xi <= xc) parity ^= 1;
+            }
+        }
+        if (parity) bits |= (1u << b);
+    }
+    out[y * words_per_row + word] ^= bits;
+}
+
+// Horizontal dilation of every row by `radius` cells (bitblock shifts; the
+// source-word sweep with the `off` window covers |radius| < 96).
+__global__ void rst_dilate_h(const unsigned int* __restrict__ in,
+                             unsigned int* out,
+                             int words, int rows, int radius) {
+    int y = blockIdx.x * blockDim.x + threadIdx.x;
+    if (y >= rows) return;
+    const unsigned int* rin = in + (size_t)y * words;
+    unsigned int* rout = out + (size_t)y * words;
+    for (int w = 0; w < words; ++w) rout[w] = 0;
+    for (int d = -radius; d <= radius; ++d) {
+        for (int w = 0; w < words; ++w) {
+            for (int ws = w - 3; ws <= w + 3; ++ws) {
+                if (ws < 0 || ws >= words) continue;
+                int off = d + 32 * (ws - w);
+                unsigned int v = rin[ws];
+                if (off >= 0 && off < 32) rout[w] |= (v << off);
+                else if (off < 0 && off > -32) rout[w] |= (v >> (-off));
+            }
+        }
+    }
+}
+
+// Vertical dilation: one thread per (row, word).
+__global__ void rst_dilate_v(const unsigned int* __restrict__ in,
+                             unsigned int* out,
+                             int words, int rows, int radius) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= words * rows) return;
+    int w = t % words;
+    int y = t / words;
+    unsigned int v = 0;
+    for (int d = -radius; d <= radius; ++d) {
+        int yy = y + d;
+        if (yy >= 0 && yy < rows) v |= in[(size_t)yy * words + w];
+    }
+    out[(size_t)y * words + w] = v;
+}
+
+// Placement search: one thread per candidate anchor (x, y) in cell units.
+// Valid iff the island mask ANDs to zero against the dilated occupancy
+// window at every mask row (unaligned window from two occupancy words).
+// mode 0 = square/auto (x+y), 1 = side-to-side vertical (y dominant),
+// 2 = side-to-side horizontal (x dominant).
+__global__ void rst_find_best(const unsigned int* __restrict__ occ,
+                              const unsigned int* __restrict__ mask,
+                              int g_words, int m_words, int m_rows,
+                              int cand_w, int cand_h,
+                              int mode, double* scores) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= cand_w * cand_h) {
+        return;
+    }
+    int x = t % cand_w;
+    int y = t / cand_w;
+    int sh = x & 31;
+    int wbase = x >> 5;
+    bool ok = true;
+    for (int my = 0; my < m_rows && ok; ++my) {
+        const unsigned int* orow = occ + (size_t)(y + my) * g_words + wbase;
+        const unsigned int* mrow = mask + (size_t)my * m_words;
+        for (int mw = 0; mw < m_words; ++mw) {
+            unsigned int m = mrow[mw];
+            if (!m) continue;
+            unsigned int window = orow[mw] >> sh;
+            if (sh > 0) window |= orow[mw + 1] << (32 - sh);
+            if (m & window) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    double score;
+    if (mode == 1) score = 1e6 * (double)y + (double)x;
+    else if (mode == 2) score = 1e6 * (double)x + (double)y;
+    else score = (double)x + (double)y;
+    scores[t] = ok ? score : 1e300;
+}
+
 }  // extern "C"

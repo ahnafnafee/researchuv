@@ -288,6 +288,50 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
         }
     }
 
+    // The rasterizer placement path (GPU occupancy grid). Created once;
+    // fixed islands seed the grid, each placed island joins it.
+    let mut raster_state = if params.raster_resolution > 0 {
+        match researchuv_gpu::RasterState::new(params.raster_resolution) {
+            Some(mut st) => {
+                if !st.reset() {
+                    None
+                } else {
+                    // Fixed islands are part of the free space.
+                    for p in placed_any.iter() {
+                        let isl = &shadows[p.island_index as usize];
+                        if !crate::raster::rasterize_placed(&mut st, isl, &p.transform, &target) {
+                            break;
+                        }
+                    }
+                    Some(st)
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    if params.raster_resolution > 0 && raster_state.is_none() {
+        eprintln!(
+            "researchuv-pack: raster placement requested but unavailable —              falling back to the exact planner"
+        );
+    }
+
+    let raster_fit = if raster_state.is_some() {
+        match params.scale_mode {
+            // Fixed-scale modes honor the user's scale exactly.
+            crate::params::ScaleMode::FixedScale | crate::params::ScaleMode::FixedScaleMaxMargin => {
+                params.scale.max(1e-9)
+            }
+            // MaxScale: the uniform grid-quantized fit.
+            crate::params::ScaleMode::MaxScale => {
+                crate::raster::fit_scale(&shadows, &movable, &target, params.margin)
+            }
+        }
+    } else {
+        1.0
+    };
+
     // Movable islands.
     for &i in movable.iter() {
         let isl = &shadows[i];
@@ -298,6 +342,32 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
             target
         };
         let base_t = shadow_t[i];
+        // Raster path first; the exact planner is the fallback.
+        let raster_hit = match raster_state.as_mut() {
+            Some(st) if !params.grouping.groups_together => {
+                match crate::raster::find_placement_raster(st, isl, &region, params, raster_fit) {
+                    Some(mut pl) => {
+                        let t = compose_transform(&pl.transform, &base_t);
+                        pl.island_index = i as u32;
+                        placed_any.push(pl.clone());
+                        placed[i] = Some(t);
+                        let ok = crate::raster::rasterize_placed(st, isl, &t, &region);
+                        if ok {
+                            Some(())
+                        } else {
+                            placed_any.pop();
+                            placed[i] = None;
+                            None
+                        }
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        if raster_hit.is_some() {
+            continue;
+        }
         match find_best_placement(isl, &placed_any, &region, params, &mut rng) {
             Some(mut pl) => {
                 let t = compose_transform(&pl.transform, &base_t);
@@ -602,6 +672,64 @@ mod tests {
         let r = pack(&mut v, &p);
         assert_eq!(r.retcode, UvpmRetcode::Warning);
         assert!(!r.validation.overlapping.is_empty());
+    }
+
+    #[test]
+    fn raster_placement_produces_a_valid_atlas() {
+        if researchuv_gpu::GpuSolver::global().is_none() {
+            eprintln!("skipping: no CUDA device/PTX available");
+            return;
+        }
+        let isls: Vec<Island> = (0..8)
+            .map(|i| {
+                let s = 0.18 + (i % 3) as f64 * 0.06;
+                let mut isl = sq(0.0, 0.0, s);
+                isl.verts[0].u += i as f64 * 1e-9; // distinct outlines
+                isl
+            })
+            .collect();
+        let mut p = PackParams::default();
+        p.raster_resolution = 256;
+        let mut v1 = isls.clone();
+        let r = pack(&mut v1, &p);
+        assert_eq!(r.retcode, UvpmRetcode::Success);
+        assert!(r.placed.iter().all(|t| t.is_some()), "all islands placed");
+        assert!(r.validation.overlapping.is_empty(), "{:?}", r.validation.overlapping);
+        let target = p.effective_box();
+        for (i, a) in r.placed.iter().flatten().enumerate() {
+            assert!(target.contains_box_eps(&a.box_, 1e-6), "island {i} outside: {:?}", a.box_);
+            for b in r.placed.iter().flatten().skip(i + 1) {
+                assert!(
+                    !crate::poly::boxes_overlap(&a.box_, &b.box_, -1e-9),
+                    "islands {i} overlap after raster placement"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn raster_falls_back_when_nothing_fits() {
+        if researchuv_gpu::GpuSolver::global().is_none() {
+            eprintln!("skipping: no CUDA device/PTX available");
+            return;
+        }
+        // One island larger than the target at fixed scale: the raster
+        // search finds no anchor, the exact planner declines too, and the
+        // arrange-outside path handles it.
+        let mut big = sq(0.0, 0.0, 5.0);
+        big.is_static = false;
+        let mut p = PackParams::default();
+        p.raster_resolution = 256;
+        p.scale_mode = crate::params::ScaleMode::FixedScale;
+        p.scale = 1.0;
+        let mut v = vec![big];
+        let r = pack(&mut v, &p);
+        // Nothing of a 5x5 fits the unit target: non-packed (or arranged
+        // outside it), never placed inside.
+        if r.non_packed.is_empty() {
+            let b = r.placed[0].expect("arranged outside").box_;
+            assert!(!Box2::unit().contains_box_eps(&b, 1e-9), "oversize placed inside the target");
+        }
     }
 
     #[test]

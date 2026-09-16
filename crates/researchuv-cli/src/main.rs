@@ -44,6 +44,8 @@ OPTIONS (unwrap):
     --rotation-step <DEG>        Island rotation step (default 90).
     --no-rotate                  Disable island rotation.
     --heuristic <SECONDS>        Enable the heuristic search with a budget.
+    --raster <RES>               Rasterizer placement resolution (GPU; 256,
+                                 512, 1024 — 0 disables).
     --quiet                      Skip the per-chart table.
 
 OPTIONS (info):
@@ -169,6 +171,7 @@ fn resolve_source(args: &[String]) -> Result<Option<(Vec<Vec3>, Vec<[u32; 3]>, S
                 a.as_str(),
                 "-o" | "--output" | "--svg" | "--stl" | "--angle" | "--weld" | "--iters" | "--packer"
                     | "--padding" | "--margin" | "--rotation-step" | "--heuristic" | "--threads"
+                    | "--raster"
             ) {
                 skip_next = true;
             }
@@ -299,6 +302,12 @@ fn cmd_unwrap(args: &[String]) -> ExitCode {
             "--heuristic" => value(&mut i)
                 .and_then(|v| v.parse::<f64>().map_err(|e| e.to_string()))
                 .map(|v| heuristic = Some(v.max(0.0))),
+            "--raster" => value(&mut i)
+                .and_then(|v| v.parse::<u32>().map_err(|e| e.to_string()))
+                .map(|v| {
+                    opts.island_pack.raster_resolution =
+                        if v == 0 { 0 } else { v.clamp(64, 4096) / 32 * 32 }
+                }),
             "--quiet" => Ok(quiet = true),
             "--fixture" => {
                 // Consumed by resolve_source (name + optional integer size).
