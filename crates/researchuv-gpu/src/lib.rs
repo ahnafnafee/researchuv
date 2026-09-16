@@ -26,7 +26,7 @@ pub mod raster;
 pub mod solver;
 
 pub use heuristic::{refine, LayoutBox};
-pub use raster::{DeviceMask, RasterMode, RasterState};
+pub use raster::{extent_class, DeviceMask, RasterMode, RasterState, EXTENT_CLASSES, N_CLASSES};
 pub use precond::{color_permutation, factor_ic0, graph_coloring, permute_csr, Ic0Factor, Precond};
 pub use solver::{CsrMatrix, GpuSolver};
 

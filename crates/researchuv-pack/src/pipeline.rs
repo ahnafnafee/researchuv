@@ -89,7 +89,9 @@ fn compose_transform(outer: &PlacedTransform, inner: &PlacedTransform) -> Placed
     let d = outer.c * inner.b + outer.d * inner.d;
     let tx = outer.a * inner.tx + outer.b * inner.ty + outer.tx;
     let ty = outer.c * inner.tx + outer.d * inner.ty + outer.ty;
-    let s = ((a * a + d * d).max(0.0)).sqrt();
+    // The uniform scale is the norm of R·S's first column (a, c) — the
+    // diagonal (a, d) vanishes at ±90° rotations.
+    let s = ((a * a + c * c).max(0.0)).sqrt();
     let det = a * d - b * c;
     let flipped = s > 0.0 && det < 0.0;
     let rotation = if flipped {
@@ -297,13 +299,21 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
                     None
                 } else {
                     // Fixed islands are part of the free space.
+                    let mut ok = true;
                     for p in placed_any.iter() {
                         let isl = &shadows[p.island_index as usize];
-                        if !crate::raster::rasterize_placed(&mut st, isl, &p.transform, &target) {
+                        if crate::raster::rasterize_placed(&mut st, isl, &p.transform, &target)
+                            .is_none()
+                        {
+                            ok = false;
                             break;
                         }
                     }
-                    Some(st)
+                    if ok {
+                        Some(st)
+                    } else {
+                        None
+                    }
                 }
             }
             None => None,
@@ -351,7 +361,7 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
                         pl.island_index = i as u32;
                         placed_any.push(pl.clone());
                         placed[i] = Some(t);
-                        let ok = crate::raster::rasterize_placed(st, isl, &t, &region);
+                        let ok = crate::raster::rasterize_placed(st, isl, &t, &region).is_some();
                         if ok {
                             Some(())
                         } else {
@@ -704,6 +714,36 @@ mod tests {
                     "islands {i} overlap after raster placement"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn raster_path_survives_rotation_ladder_and_nonzero_origins() {
+        if researchuv_gpu::GpuSolver::global().is_none() {
+            eprintln!("skipping: no CUDA device/PTX available");
+            return;
+        }
+        // Four 2×1 strips at a nonzero raw origin: the rotation ladder runs
+        // per island (some orientations fit rows, others don't), and the
+        // nonzero origin exercises the mask's min-shift. Whatever mix of
+        // raster and exact-fallback placements results must be valid.
+        let strip = |k: f64| Island::from_polygon(vec![
+            Vec2::new(3.0 + k * 0.01, 5.0),
+            Vec2::new(5.0 + k * 0.01, 5.0),
+            Vec2::new(5.0 + k * 0.01, 6.0),
+            Vec2::new(3.0 + k * 0.01, 6.0),
+        ]);
+        let isls: Vec<Island> = (0..4).map(|k| strip(k as f64)).collect();
+        let mut p = PackParams::default();
+        p.raster_resolution = 256;
+        let mut v1 = isls.clone();
+        let r = pack(&mut v1, &p);
+        assert_eq!(r.retcode, UvpmRetcode::Success);
+        assert!(r.placed.iter().all(|t| t.is_some()), "all strips placed");
+        assert!(r.validation.overlapping.is_empty(), "{:?}", r.validation.overlapping);
+        let target = p.effective_box();
+        for (i, a) in r.placed.iter().flatten().enumerate() {
+            assert!(target.contains_box_eps(&a.box_, 1e-6), "strip {i} outside: {:?}", a.box_);
         }
     }
 

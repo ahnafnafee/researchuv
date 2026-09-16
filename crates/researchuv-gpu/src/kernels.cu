@@ -310,11 +310,13 @@ __global__ void rst_dilate_v(const unsigned int* __restrict__ in,
 }
 
 // Placement search: one thread per candidate anchor (x, y) in cell units.
-// Valid iff the island mask ANDs to zero against the dilated occupancy
-// window at every mask row (unaligned window from two occupancy words).
+// Valid iff the island mask ANDs to zero against EVERY grid in the table
+// (the per-class margin grids for this candidate's extent class) at every
+// mask row; the unaligned window comes from two occupancy words.
 // mode 0 = square/auto (x+y), 1 = side-to-side vertical (y dominant),
 // 2 = side-to-side horizontal (x dominant).
-__global__ void rst_find_best(const unsigned int* __restrict__ occ,
+__global__ void rst_find_best(const unsigned long long* __restrict__ grid_ptrs,
+                              int n_grids,
                               const unsigned int* __restrict__ mask,
                               int g_words, int m_words, int m_rows,
                               int cand_w, int cand_h,
@@ -328,17 +330,21 @@ __global__ void rst_find_best(const unsigned int* __restrict__ occ,
     int sh = x & 31;
     int wbase = x >> 5;
     bool ok = true;
-    for (int my = 0; my < m_rows && ok; ++my) {
-        const unsigned int* orow = occ + (size_t)(y + my) * g_words + wbase;
-        const unsigned int* mrow = mask + (size_t)my * m_words;
-        for (int mw = 0; mw < m_words; ++mw) {
-            unsigned int m = mrow[mw];
-            if (!m) continue;
-            unsigned int window = orow[mw] >> sh;
-            if (sh > 0) window |= orow[mw + 1] << (32 - sh);
-            if (m & window) {
-                ok = false;
-                break;
+    for (int g = 0; g < n_grids && ok; ++g) {
+        const unsigned int* occ =
+            reinterpret_cast<const unsigned int*>(grid_ptrs[g]);
+        for (int my = 0; my < m_rows && ok; ++my) {
+            const unsigned int* orow = occ + (size_t)(y + my) * g_words + wbase;
+            const unsigned int* mrow = mask + (size_t)my * m_words;
+            for (int mw = 0; mw < m_words; ++mw) {
+                unsigned int m = mrow[mw];
+                if (!m) continue;
+                unsigned int window = orow[mw] >> sh;
+                if (sh > 0) window |= orow[mw + 1] << (32 - sh);
+                if (m & window) {
+                    ok = false;
+                    break;
+                }
             }
         }
     }
