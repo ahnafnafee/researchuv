@@ -485,14 +485,19 @@ fn gpu_solve(
     }
     let a = researchuv_gpu::CsrMatrix { vals, cols, row_ptr };
     let gpu = researchuv_gpu::GpuSolver::global()?;
+    // The engine default is Jacobi (measured best at chart sizes); the
+    // RESEARCHUV_GPU_PRECOND env var switches the backend for benchmarking
+    // and for very large / near-singular systems (amg | ic0color | ic0 |
+    // none | jacobi).
+    let pc = match std::env::var("RESEARCHUV_GPU_PRECOND").as_deref() {
+        Ok("amg") => researchuv_gpu::Precond::Amg,
+        Ok("ic0color") => researchuv_gpu::Precond::Ic0Color,
+        Ok("ic0") => researchuv_gpu::Precond::Ic0,
+        Ok("none") => researchuv_gpu::Precond::None,
+        _ => researchuv_gpu::Precond::Jacobi,
+    };
     let mut x = gpu
-        .cg_solve_precond(
-            &a,
-            &rhs[..nvar_free],
-            max_iter.max(1024) * 16,
-            1e-12,
-            researchuv_gpu::Precond::Jacobi,
-        )?
+        .cg_solve_precond(&a, &rhs[..nvar_free], max_iter.max(1024) * 16, 1e-12, pc)?
         .0;
     // Slack row: M[aux][aux] = mix_w, rhs[aux] = mix_w ⇒ slack = 1.
     x.push(1.0);

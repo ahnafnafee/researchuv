@@ -139,7 +139,7 @@ The unfolding pipeline offers two final packers: the historic greedy shelf packe
 | **Diagnostics** | Conformal and area distortion, winding-consistency folds, overlap checks, and topology invariants |
 | **Validation** | Malformed-mesh reports (indices, NaNs, non-manifold edges, isolated vertices) and atlas reports (unplaced islands, UVs outside `[0,1]²`, overlaps) |
 | **Fixtures** | Subdivided cubes, UV spheres, closed tori, torus annuli, grid planes, and open cylinders |
-| **Execution** | Deterministic multi-core unfold stage, a CUDA conjugate-gradient solver (120×+ on large charts, CPU fallback), Jacobi/IC(0) preconditioning, and a GPU multi-restart packing heuristic |
+| **Execution** | Deterministic multi-core unfold stage, a CUDA conjugate-gradient solver (120×+ on large charts, CPU fallback) with Jacobi, level-scheduled IC(0), multi-color IC(0), and aggregation-AMG preconditioning, plus a GPU multi-restart packing heuristic |
 | **I/O & tooling** | OBJ/STL import, OBJ/STL/SVG export, the `researchuv` CLI, a catalog API with host dispatch, a browser atlas editor, and stage benchmarks |
 
 <div align="right">
@@ -219,7 +219,8 @@ Release-mode tests make the larger sphere and torus fixtures practical to run. T
 - [x] GPU execution (CUDA conjugate-gradient unfold solve) and an interactive atlas editor (browser-served).
 - [x] Distortion-driven chart splitting (folding charts re-cut automatically).
 - [x] Preconditioned GPU solver (Jacobi and level-scheduled IC0) and a GPU multi-restart packing heuristic.
-- [ ] Red-black/GPU-friendly orderings to level IC0 on elongated charts; AMG-class preconditioner.
+- [x] GPU-friendly orderings to level IC(0) on elongated charts (multi-color) and an AMG-class preconditioner (pairwise aggregation, Galerkin, V(1,1)).
+- [ ] Free-space rasterizer packer (dilate/merge GPU pipeline).
 
 <a id="contributing"></a>
 

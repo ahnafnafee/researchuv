@@ -22,8 +22,95 @@ pub enum Precond {
     None,
     /// Jacobi (inverse-diagonal) scaling.
     Jacobi,
-    /// Incomplete Cholesky, zero fill-in, natural ordering.
+    /// Incomplete Cholesky, zero fill-in, natural ordering. Triangular
+    /// solves are level-scheduled: on elongated (1-D-like) charts the level
+    /// count grows linearly — use [`Precond::Ic0Color`] there.
     Ic0,
+    /// IC(0) in a **multi-color ordering**: the mesh graph is distance-1
+    /// colored and unknowns are permuted color-major, so the factor's
+    /// dependency levels are bounded by the color count (a small constant —
+    /// 2 for a path, ~4-8 for planar meshes) regardless of chart shape.
+    Ic0Color,
+    /// Aggregation algebraic multigrid: pairwise matched aggregation,
+    /// Galerkin coarse operators, a device V-cycle with one damped-Jacobi
+    /// post-smooth per level and an exact host solve at the coarsest level.
+    Amg,
+}
+
+/// A distance-1 greedy graph coloring (smallest feasible color per vertex,
+/// vertices scanned in index order — deterministic). Returns the color of
+/// each vertex (0-based).
+pub fn graph_coloring(a: &CsrMatrix) -> Vec<u32> {
+    let n = a.rows();
+    let mut color = vec![u32::MAX; n];
+    let mut used: Vec<u32> = Vec::new();
+    for v in 0..n {
+        used.clear();
+        for (c, _) in a.row(v) {
+            let cu = c as usize;
+            if cu != v && color[cu] != u32::MAX {
+                used.push(color[cu]);
+            }
+        }
+        used.sort_unstable();
+        used.dedup();
+        let mut k = 0u32;
+        for &c in &used {
+            if c == k {
+                k += 1;
+            } else {
+                break;
+            }
+        }
+        color[v] = k;
+    }
+    color
+}
+
+/// The color-major permutation and its inverse: `to_perm[orig] = position`
+/// and `to_orig[position] = orig` (original index ascending within a color).
+pub fn color_permutation(color: &[u32]) -> (Vec<i32>, Vec<i32>) {
+    let n = color.len();
+    let n_colors = color.iter().copied().max().map(|c| c + 1).unwrap_or(0) as usize;
+    let mut counts = vec![0usize; n_colors + 1];
+    for &c in color {
+        counts[c as usize + 1] += 1;
+    }
+    for k in 1..counts.len() {
+        counts[k] += counts[k - 1];
+    }
+    let mut to_perm = vec![0i32; n];
+    let mut to_orig = vec![0i32; n];
+    let mut cursor = counts.clone();
+    for (v, &c) in color.iter().enumerate() {
+        let pos = cursor[c as usize];
+        cursor[c as usize] += 1;
+        to_perm[v] = pos as i32;
+        to_orig[pos] = v as i32;
+    }
+    (to_perm, to_orig)
+}
+
+/// The symmetric permutation `P·A·Pᵀ` in CSR (rows follow `to_orig`).
+pub fn permute_csr(a: &CsrMatrix, to_perm: &[i32], to_orig: &[i32]) -> CsrMatrix {
+    let n = a.rows();
+    let mut vals = Vec::with_capacity(a.vals.len());
+    let mut cols = Vec::with_capacity(a.cols.len());
+    let mut row_ptr = vec![0i32; n + 1];
+    for pos in 0..n {
+        let orig = to_orig[pos] as usize;
+        let mut entries: Vec<(i32, f64)> = a
+            .row(orig)
+            .map(|(c, v)| (to_perm[c as usize], v))
+            .collect();
+        entries.sort_unstable_by_key(|(c, _)| *c);
+        for (c, v) in entries {
+            cols.push(c);
+            vals.push(v);
+        }
+        row_ptr[pos + 1] = vals.len() as i32;
+    }
+    CsrMatrix { vals, cols, row_ptr }
 }
 
 /// A factored IC(0) preconditioner ready for device upload.
@@ -211,52 +298,115 @@ pub(crate) struct DeviceIc0 {
     pub scratch: u64,
 }
 
-/// Upload the IC(0) preconditioner for `a` to the device.
-pub(crate) fn upload(
+/// Device-resident colored IC(0): the factor of the color-permuted matrix
+/// plus the index arrays and scratch for the gather round-trip.
+pub(crate) struct DeviceIc0Color {
+    pub base: DeviceIc0,
+    /// i32 × n: permuted position → original index.
+    pub d_to_orig: u64,
+    /// i32 × n: original index → permuted position.
+    pub d_to_perm: u64,
+    /// Permuted-space scratch (restricted r, solved z).
+    pub d_rp: u64,
+    pub d_zp: u64,
+}
+
+/// The uploaded preconditioner state for any [`Precond`] kind.
+pub(crate) enum DevicePrecond {
+    None,
+    Jacobi {
+        d_inv_diag: u64,
+    },
+    Ic0(DeviceIc0),
+    Ic0Color(Box<DeviceIc0Color>),
+    Amg(Box<crate::amg::DeviceAmg>),
+}
+
+/// Build and upload the device state for `a` under `kind`.
+pub(crate) fn upload_precond(
     mem: &mut DeviceMem,
     c: &Cuda,
     a: &CsrMatrix,
     kind: Precond,
-) -> Option<DeviceIc0> {
+) -> Option<DevicePrecond> {
     match kind {
-        Precond::None | Precond::Jacobi => None,
-        Precond::Ic0 => {
-            let f = factor_ic0(a)?;
-            let l_vals = mem.upload(c, &f.l_vals)?;
-            let l_cols = mem.upload(c, &f.l_cols)?;
-            let l_ptr = mem.upload(c, &f.l_ptr)?;
-            let lt_vals = mem.upload(c, &f.lt_vals)?;
-            let lt_cols = mem.upload(c, &f.lt_cols)?;
-            let lt_ptr = mem.upload(c, &f.lt_ptr)?;
-            let flatten = |levels: &[Vec<i32>]| -> (Vec<i32>, Vec<i32>) {
-                let mut rows = Vec::new();
-                let mut offsets = vec![0i32];
-                for lvl in levels {
-                    rows.extend_from_slice(lvl);
-                    offsets.push(rows.len() as i32);
-                }
-                (rows, offsets)
-            };
-            let (fwd_rows, fwd_offsets) = flatten(&f.fwd_levels);
-            let (bwd_rows, bwd_offsets) = flatten(&f.bwd_levels);
-            let d_fwd_rows = mem.upload(c, &fwd_rows)?;
-            let d_bwd_rows = mem.upload(c, &bwd_rows)?;
-            let scratch = mem.alloc_f64(c, a.rows())?;
-            Some(DeviceIc0 {
-                l_vals,
-                l_cols,
-                l_ptr,
-                lt_vals,
-                lt_cols,
-                lt_ptr,
-                d_fwd_rows,
-                d_bwd_rows,
-                fwd_offsets,
-                bwd_offsets,
-                scratch,
-            })
+        Precond::None => Some(DevicePrecond::None),
+        Precond::Jacobi => {
+            let inv: Vec<f64> = (0..a.rows())
+                .map(|i| {
+                    let d = a.row_get(i, i as i32);
+                    if d.abs() < 1e-300 {
+                        f64::NAN
+                    } else {
+                        1.0 / d
+                    }
+                })
+                .collect();
+            if inv.iter().any(|v| !v.is_finite()) {
+                return None;
+            }
+            let d_inv_diag = mem.upload(c, &inv)?;
+            Some(DevicePrecond::Jacobi { d_inv_diag })
         }
+        Precond::Ic0 => upload_ic0(mem, c, a).map(DevicePrecond::Ic0),
+        Precond::Ic0Color => {
+            let color = graph_coloring(a);
+            let (to_perm, to_orig) = color_permutation(&color);
+            let permuted = permute_csr(a, &to_perm, &to_orig);
+            let base = upload_ic0(mem, c, &permuted)?;
+            let d_to_orig = mem.upload(c, &to_orig)?;
+            let d_to_perm = mem.upload(c, &to_perm)?;
+            let n = a.rows();
+            let d_rp = mem.alloc_f64(c, n)?;
+            let d_zp = mem.alloc_f64(c, n)?;
+            Some(DevicePrecond::Ic0Color(Box::new(DeviceIc0Color {
+                base,
+                d_to_orig,
+                d_to_perm,
+                d_rp,
+                d_zp,
+            })))
+        }
+        Precond::Amg => crate::amg::build(mem, c, a).map(|amg| DevicePrecond::Amg(Box::new(amg))),
     }
+}
+
+/// Upload the IC(0) preconditioner for `a` to the device.
+pub(crate) fn upload_ic0(mem: &mut DeviceMem, c: &Cuda, a: &CsrMatrix) -> Option<DeviceIc0> {
+    let f = factor_ic0(a)?;
+    let l_vals = mem.upload(c, &f.l_vals)?;
+    let l_cols = mem.upload(c, &f.l_cols)?;
+    let l_ptr = mem.upload(c, &f.l_ptr)?;
+    let lt_vals = mem.upload(c, &f.lt_vals)?;
+    let lt_cols = mem.upload(c, &f.lt_cols)?;
+    let lt_ptr = mem.upload(c, &f.lt_ptr)?;
+    let flatten = |levels: &[Vec<i32>]| -> (Vec<i32>, Vec<i32>) {
+        let mut rows = Vec::new();
+        let mut offsets = vec![0i32];
+        for lvl in levels {
+            rows.extend_from_slice(lvl);
+            offsets.push(rows.len() as i32);
+        }
+        (rows, offsets)
+    };
+    let (fwd_rows, fwd_offsets) = flatten(&f.fwd_levels);
+    let (bwd_rows, bwd_offsets) = flatten(&f.bwd_levels);
+    let d_fwd_rows = mem.upload(c, &fwd_rows)?;
+    let d_bwd_rows = mem.upload(c, &bwd_rows)?;
+    let scratch = mem.alloc_f64(c, a.rows())?;
+    Some(DeviceIc0 {
+        l_vals,
+        l_cols,
+        l_ptr,
+        lt_vals,
+        lt_cols,
+        lt_ptr,
+        d_fwd_rows,
+        d_bwd_rows,
+        fwd_offsets,
+        bwd_offsets,
+        scratch,
+    })
 }
 
 #[cfg(test)]

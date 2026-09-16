@@ -12,17 +12,20 @@
 //! | --- | --- |
 //! | [`ffi`] | Runtime-loaded driver entry points (the workspace's only `unsafe`) |
 //! | [`solver`] | The safe CG wrapper over CSR systems |
+//! | [`precond`] | Jacobi, IC(0) (natural and multi-color orderings) |
+//! | [`amg`] | Aggregation AMG (pairwise matching, Galerkin, device V-cycle) |
 //!
 //! This crate intentionally does not carry `#![forbid(unsafe_code)]`: the
 //! driver boundary requires it. Everything above [`solver`] stays safe.
 
+pub mod amg;
 pub mod ffi;
 pub mod heuristic;
 pub mod precond;
 pub mod solver;
 
 pub use heuristic::{refine, LayoutBox};
-pub use precond::{factor_ic0, Ic0Factor, Precond};
+pub use precond::{color_permutation, factor_ic0, graph_coloring, permute_csr, Ic0Factor, Precond};
 pub use solver::{CsrMatrix, GpuSolver};
 
 #[cfg(test)]
