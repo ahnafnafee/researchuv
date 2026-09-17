@@ -6,17 +6,18 @@ use crate::precond;
 use crate::solver::{CsrMatrix, DeviceMem, GpuSolver};
 
 /// Upload the hierarchy for `a` under the crate's own test access.
-fn upload(gpu: &GpuSolver, a: &CsrMatrix) -> Option<(DeviceMem, DeviceAmg)> {
+fn upload(gpu: &GpuSolver, a: &CsrMatrix, smooth: bool) -> Option<(DeviceMem, DeviceAmg)> {
     let c = &gpu.cuda;
     let mut mem = DeviceMem::new(c);
-    let amg = amg::build(&mut mem, c, a)?;
+    let amg = amg::build(&mut mem, c, a, smooth)?;
     Some((mem, amg))
 }
 
-/// Apply the AMG preconditioner to `r` and return `M⁻¹ r` on the host.
-pub fn probe_apply(gpu: &GpuSolver, a: &CsrMatrix, r: &[f64]) -> Vec<f64> {
+/// Apply one AMG preconditioner cycle to `r` and return `M⁻¹ r` on the
+/// host (`smooth` selects the smoothed-aggregation transfer).
+pub fn probe_apply_smoothed(gpu: &GpuSolver, a: &CsrMatrix, r: &[f64], smooth: bool) -> Vec<f64> {
     let n = a.rows();
-    let (_mem, mut amg) = match upload(gpu, a) {
+    let (_mem, mut amg) = match upload(gpu, a, smooth) {
         Some(x) => x,
         None => return vec![f64::NAN; n],
     };
@@ -43,12 +44,17 @@ pub fn probe_apply(gpu: &GpuSolver, a: &CsrMatrix, r: &[f64]) -> Vec<f64> {
     out
 }
 
+/// The (unsmoothed) preconditioner's action on `r` — `M⁻¹ r` on the host.
+pub fn probe_apply(gpu: &GpuSolver, a: &CsrMatrix, r: &[f64]) -> Vec<f64> {
+    probe_apply_smoothed(gpu, a, r, false)
+}
+
 /// The preconditioner's action on the first `k` basis vectors.
 pub fn probe_columns(gpu: &GpuSolver, a: &CsrMatrix, k: usize) -> Vec<Vec<f64>> {
     let n = a.rows();
     (0..k.min(n))
         .map(|i| {
-            let mut e = vec![0.0f64; n];
+            let mut e = vec![0.0; n];
             e[i] = 1.0;
             probe_apply(gpu, a, &e)
         })

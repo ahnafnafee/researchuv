@@ -96,24 +96,9 @@ __global__ void tri_level(const double* __restrict__ vals,
 
 // Indexed gather: dst[i] = src[idx[i]] (permutations for colored IC(0)).
 __global__ void gather(double* dst, const double* __restrict__ src,
-                       const int* __restrict__ idx, int n) {
+                       const int* idx, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = src[idx[i]];
-}
-
-// Per-aggregate deterministic sum: out[j] = sum of in[members(j)].
-// One thread per aggregate, members summed in list order (no atomics —
-// bitwise deterministic).
-__global__ void agg_sum(const double* __restrict__ in,
-                        double* out,
-                        const int* __restrict__ members,
-                        const int* __restrict__ m_ptr,
-                        int n_agg) {
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j >= n_agg) return;
-    double s = 0.0;
-    for (int k = m_ptr[j]; k < m_ptr[j + 1]; ++k) s += in[members[k]];
-    out[j] = s;
 }
 
 // ---- GPU packing heuristic -------------------------------------------------------------

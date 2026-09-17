@@ -487,9 +487,10 @@ fn gpu_solve(
     let gpu = researchuv_gpu::GpuSolver::global()?;
     // The engine default is Jacobi (measured best at chart sizes); the
     // RESEARCHUV_GPU_PRECOND env var switches the backend for benchmarking
-    // and for very large / near-singular systems (amg | ic0color | ic0 |
-    // none | jacobi).
+    // and for very large / near-singular systems (amgsa | amg | ic0color |
+    // ic0 | none | jacobi).
     let pc = match std::env::var("RESEARCHUV_GPU_PRECOND").as_deref() {
+        Ok("amgsa") => researchuv_gpu::Precond::AmgSa,
         Ok("amg") => researchuv_gpu::Precond::Amg,
         Ok("ic0color") => researchuv_gpu::Precond::Ic0Color,
         Ok("ic0") => researchuv_gpu::Precond::Ic0,

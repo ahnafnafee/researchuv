@@ -10,13 +10,15 @@
 //!
 //! | Module | Responsibility |
 //! | --- | --- |
-//! | [`ffi`] | Runtime-loaded driver entry points (the workspace's only `unsafe`) |
+//! | [`ffi`] | Runtime-loaded driver entry points (the driver `unsafe` boundary) |
 //! | [`solver`] | The safe CG wrapper over CSR systems |
-//! | [`precond`] | Jacobi, IC(0) (natural and multi-color orderings) |
-//! | [`amg`] | Aggregation AMG (pairwise matching, Galerkin, device V-cycle) |
+//! | [`precond`] | Jacobi, IC(0) (natural and multi-color orderings), exact sparse Cholesky |
+//! | [`amg`] | Aggregation AMG (tentative and smoothed transfers, Galerkin, device K-cycle, sparse coarse solve) |
 //!
 //! This crate intentionally does not carry `#![forbid(unsafe_code)]`: the
-//! driver boundary requires it. Everything above [`solver`] stays safe.
+//! driver boundary requires it, and the launch sites in [`solver`],
+//! [`precond`], and [`amg`] wrap every call over checked handles. The
+//! numerical logic above the kernels stays safe.
 
 pub mod amg;
 #[cfg(any(test, feature = "internal-probes"))]
