@@ -139,7 +139,7 @@ pub fn find_placement_raster(
         return None;
     }
     let mut best: Option<(f64, f64, u32, u32, (f64, f64), u32, u32)> = None;
-    for &theta in params.rotation_candidates(-1).iter() {
+    for &theta in params.rotation_candidates_for(island, -1).iter() {
         let fp = footprint(island, theta, fit_scale, origin, k);
         if fp.w > st.resolution || fp.h > st.resolution {
             continue;

@@ -256,7 +256,7 @@ pub fn find_best_placement(
         .iparam_channel(iparam::ISLAND_ROT_STEP)
         .map(|v| v as i32)
         .unwrap_or(-1);
-    let rotations = params.rotation_candidates(island_step);
+    let rotations = params.rotation_candidates_for(island, island_step);
     let mut flips = vec![false];
     if params.flipping_enable {
         flips.push(true);
@@ -469,9 +469,10 @@ pub fn island_box_clear(b: &Box2, placed: &[Placed], gap: f64) -> bool {
 /// `anchor` sits side-by-side with an already-placed island (horizontally
 /// separated, vertically overlapping), return that island's `min.v` so the
 /// new island aligns to the same row. Same-row islands share a common v
-/// baseline regardless of their individual scales / border nudges. Returns
-/// `None` when there is no horizontally-separated neighbor whose v-range
-/// overlaps.
+/// baseline regardless of their individual scales / border nudges. A box
+/// whose v-range merely *touches* the neighbor's (stacked directly above or
+/// below) does not count — snapping it onto the neighbor's row would drag it
+/// into an overlap. Returns `None` when there is no such neighbor.
 fn row_snap_v(anchor: Vec2, w: f64, h: f64, placed: &[Placed]) -> Option<f64> {
     let eps = 1e-9;
     for p in placed {
@@ -483,7 +484,8 @@ fn row_snap_v(anchor: Vec2, w: f64, h: f64, placed: &[Placed]) -> Option<f64> {
         if !to_right && !to_left {
             continue;
         }
-        if anchor.v < p.box_.max.v + eps && anchor.v + h > p.box_.min.v - eps {
+        // Genuine v-overlap, not touching from above/below.
+        if anchor.v < p.box_.max.v - eps && anchor.v + h > p.box_.min.v + eps {
             return Some(p.box_.min.v);
         }
     }

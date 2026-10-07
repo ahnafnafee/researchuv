@@ -135,12 +135,20 @@ The unfolding pipeline offers two final packers: the historic greedy shelf packe
 | --- | --- |
 | **Mesh preparation** | Vertex welding, degenerate-face filtering, adjacency, and boundary loops |
 | **Unwrapping** | Sharp-edge charting, geodesic seam trees for closed charts, least-squares solving, border constraints, and chart normalization |
-| **Packing** | Shelf packing or the configurable UVPackmaster-grade island packer, connected to the pipeline |
-| **Diagnostics** | Conformal and area distortion, winding-consistency folds, overlap checks, and topology invariants |
+| **Packing** | Shelf packing or the configurable UVPackmaster-grade island packer, connected to the pipeline; optional near-square tilt candidates from the optimal equal-square packings |
+| **Diagnostics** | Conformal and area distortion, winding-consistency folds, overlap checks, topology invariants, and packing quality (atlas utilization plus a certified optimality gap for equal-square island sets) |
 | **Validation** | Malformed-mesh reports (indices, NaNs, non-manifold edges, isolated vertices) and atlas reports (unplaced islands, UVs outside `[0,1]²`, overlaps) |
 | **Fixtures** | Subdivided cubes, UV spheres, closed tori, torus annuli, grid planes, and open cylinders |
 | **Execution** | Deterministic multi-core unfold stage, a CUDA conjugate-gradient solver (120×+ on large charts, CPU fallback) with Jacobi, level-scheduled IC(0), multi-color IC(0), aggregation-AMG, and smoothed-aggregation-AMG preconditioning (the latter with an exact sparse coarse solve on the device), plus a GPU multi-restart packing heuristic |
 | **I/O & tooling** | OBJ/STL import, OBJ/STL/SVG export, the `researchuv` CLI, a catalog API with host dispatch, a browser atlas editor, and stage benchmarks |
+
+### Certified packing-quality ground truth
+
+The packer ships with reference data from the mathematical square-packing problem: the side `s(n)` of the smallest square holding `n` unit squares. Curated certified bounds (register `T-xxx` ids from [the squares project](https://jlevy.github.io/squares/), data under CC BY 4.0; classical proven values; the 2026 Lean 4 optimality proof for `s(11)`) live in `researchuv-pack`'s `sqbounds` module and power three things:
+
+- **Optimality-gap benchmarks** (`researchuv-pack`'s `squares_gap` tests and the `squares` bench): pack `n` unit-square islands at a binary-searched uniform scale and compare the achieved container side against the proven floor — a soundness tripwire (an achieved side below a certified bound means an overlap escaped validation) and an honest quality dial.
+- **A quality report on every pack result** (`PackResult::quality`): atlas utilization, and for equal-square island sets the certified utilization ceiling `n / s(n)²` plus the gap to it, surfaced in the atlas report.
+- **Replayable packing certificates** (`researchuv-pack`'s `cert` module): per-island transforms plus a parameter digest, JSON-serializable, replayed through the exact polygon validator — with mutant tests that deliberately corrupt certificates to prove the validator is not vacuous (the squares project's verification-rung discipline).
 
 <div align="right">
 
@@ -200,6 +208,12 @@ cargo test --locked --release -p researchuv-unwrap --test parity
 # and a CUDA-solve column when a device is present).
 cargo bench --locked -p researchuv-unwrap
 
+# Measure the island packer against certified square-packing bounds: the
+# achieved container side for n unit-square islands vs. the proven floors
+# and best-known packings of the equal-square problem (exact planner, tilt
+# candidates, and the GPU raster path when a device is present).
+cargo bench --locked -p researchuv-pack
+
 # Generate local API documentation.
 cargo doc --workspace --no-deps --open
 ```
@@ -222,6 +236,7 @@ Release-mode tests make the larger sphere and torus fixtures practical to run. T
 - [x] GPU-friendly orderings to level IC(0) on elongated charts (multi-color) and an AMG-class preconditioner (pairwise aggregation, Galerkin, V(1,1)).
 - [x] Free-space rasterizer packer (dilate/merge GPU pipeline).
 - [x] Smoothed aggregation (CSR transfer operators, size-4 aggregates) and sparse coarse-solve pipelines (exact nested-dissection Cholesky applied on the device).
+- [x] Certified packing-quality ground truth: equal-square optimality-gap benchmarks and quality-gap reporting against proven `s(n)` bounds (the [squares project](https://jlevy.github.io/squares/), CC BY 4.0), near-square tilt rotation candidates, and replayable packing certificates with mutant checks.
 
 <a id="contributing"></a>
 

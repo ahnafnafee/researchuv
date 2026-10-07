@@ -103,7 +103,6 @@ pub fn heuristic_refine(
     let strategy = effective_strategy(params);
     let mut stats = HeuristicStats::default();
     let mut score = packing_score(placed, target, params);
-    let rotations = params.rotation_candidates(-1);
     let mut stagnant = 0u32;
 
     loop {
@@ -139,6 +138,9 @@ pub fn heuristic_refine(
             if extent <= 0.0 {
                 continue;
             }
+            // Per-island candidate ladder (tilt candidates apply to
+            // near-square islands only).
+            let rotations = params.rotation_candidates_for(isl, -1);
 
             let others: Vec<Placed> = placed
                 .iter()

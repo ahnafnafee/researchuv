@@ -276,6 +276,31 @@ pub fn run(
                 format!("island {i} has a self-intersecting outline"),
             );
         }
+        // Packing-quality context (utilization; certified equal-square gap).
+        let q = &pack.quality;
+        atlas_report.push(
+            validate::Severity::Info,
+            "AtlasUtilization",
+            format!(
+                "atlas utilization {:.3} (bbox {:.3}) over {} placed island(s)",
+                q.utilization, q.bbox_utilization, q.placed_count
+            ),
+        );
+        if let Some(e) = q.equal_squares {
+            let gap = q.certified_gap().map(|g| format!(" — {g:.3} of the certified ceiling")).unwrap_or_default();
+            atlas_report.push(
+                validate::Severity::Info,
+                "EqualSquareReference",
+                format!(
+                    "{} equal square islands: certified minimal side {:.6}, best known {:.6}{} ({})",
+                    e.n,
+                    e.certified_lower_side,
+                    e.best_known_side,
+                    gap,
+                    e.source
+                ),
+            );
+        }
     }
     let mut multi = MultiMesh::new(mesh.clone());
     multi.islands = islands;

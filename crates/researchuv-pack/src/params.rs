@@ -642,6 +642,16 @@ pub struct PackParams {
     /// Per-island rotation step value, 1..180 (default 90; applied when
     /// `island_rot_step_enable` and the island's channel is unset, i.e. −1).
     pub island_rot_step: u32,
+    /// Research extension (default **false**): near-square islands also try
+    /// the characteristic tilt angles of the optimal equal-square packings
+    /// (atan(1/3), atan(1/2), 45°, atan(2), atan(3), each plus 90° turns).
+    /// Those five angles within [0°, 90°) are exactly the tilts appearing in
+    /// the proven optima for 5, 10, and 11 unit squares (the squares
+    /// project, <https://jlevy.github.io/squares/>), where tilted layouts
+    /// beat every axis-aligned one. Off by default: it widens the placement
+    /// search (~6× more orientation candidates) and trades pixel-axis
+    /// alignment for density.
+    pub tilt_candidates: bool,
 
     // --- scale ---
     /// Scale mode (default MaxScale).
@@ -758,6 +768,7 @@ impl Default for PackParams {
             rotation_step: 90,
             island_rot_step_enable: false,
             island_rot_step: 90,
+            tilt_candidates: false,
             scale_mode: ScaleMode::default(),
             scale: 1.0,
             normalize_scale: false,
@@ -864,6 +875,47 @@ impl PackParams {
         RotationStep { degrees: step }.angles()
     }
 
+    /// The rotation candidates (radians) for a *specific* island: the base
+    /// ladder from [`rotation_candidates`], plus — when `tilt_candidates` is
+    /// set and the island is near-square — the characteristic tilt angles of
+    /// the optimal equal-square packings, each replicated at +90°/ +180°/
+    /// +270°. Near-square means the bbox aspect ratio is at most 4:3; a
+    /// tilted rectangle wastes its own bounding box, so tilts only pay for
+    /// shapes that are close to square.
+    pub fn rotation_candidates_for(
+        &self,
+        island: &crate::island::Island,
+        island_step_override_deg: i32,
+    ) -> Vec<f64> {
+        let mut out = self.rotation_candidates(island_step_override_deg);
+        if !self.tilt_candidates || !self.rotation_enable {
+            return out;
+        }
+        let w = island.bbox.width();
+        let h = island.bbox.height();
+        if w <= 0.0 || h <= 0.0 {
+            return out;
+        }
+        let aspect = w.max(h) / w.min(h);
+        if aspect > 4.0 / 3.0 {
+            return out;
+        }
+        let quarter = std::f64::consts::FRAC_PI_2;
+        let tilts = [
+            (1.0f64).atan2(3.0), // 18.435°
+            (1.0f64).atan2(2.0), // 26.565°
+            std::f64::consts::FRAC_PI_4,
+            (2.0f64).atan2(1.0), // 63.435°
+            (3.0f64).atan2(1.0), // 71.565°
+        ];
+        for &t in tilts.iter() {
+            for k in 0..4 {
+                out.push(t + k as f64 * quarter);
+            }
+        }
+        out
+    }
+
     /// The tile target geometry for the effective box.
     pub fn tile_target(&self) -> Option<TileTarget> {
         match self.tile_target {
@@ -920,6 +972,7 @@ mod tests {
         assert_eq!(p.rotation_step, 90);
         assert!(!p.island_rot_step_enable);
         assert_eq!(p.island_rot_step, 90);
+        assert!(!p.tilt_candidates, "tilt candidates default off");
         assert_eq!(p.scale_mode, ScaleMode::MaxScale);
         assert!(p.fully_inside);
         assert_eq!(p.pack_strategy, PackStrategy::Automatic);
@@ -966,6 +1019,42 @@ mod tests {
         assert_eq!(p4.rotation_candidates(45).len(), 8);
         let p5 = PackParams::default();
         assert_eq!(p5.rotation_candidates(45).len(), 4, "disabled: global only");
+    }
+
+    #[test]
+    fn tilt_candidates_for_near_square_islands() {
+        use crate::island::Island;
+        use researchuv_math::Vec2;
+        let sq = Island::from_polygon(vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(0.0, 1.0),
+        ]);
+        let strip = Island::from_polygon(vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(2.0, 0.0),
+            Vec2::new(2.0, 1.0),
+            Vec2::new(0.0, 1.0),
+        ]);
+        // Off by default: near-square islands get the plain ladder.
+        let p0 = PackParams::default();
+        assert_eq!(p0.rotation_candidates_for(&sq, -1).len(), 4);
+        // On: near-square islands gain 5 tilts × 4 quarter-turns = 20.
+        let p = PackParams {
+            tilt_candidates: true,
+            ..PackParams::default()
+        };
+        assert_eq!(p.rotation_candidates_for(&sq, -1).len(), 24);
+        // Elongated islands (> 4:3 aspect) do not.
+        assert_eq!(p.rotation_candidates_for(&strip, -1).len(), 4);
+        // Rotation disabled collapses everything to the identity.
+        let p2 = PackParams {
+            tilt_candidates: true,
+            rotation_enable: false,
+            ..PackParams::default()
+        };
+        assert_eq!(p2.rotation_candidates_for(&sq, -1), vec![0.0]);
     }
 
     #[test]

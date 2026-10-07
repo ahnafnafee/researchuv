@@ -59,13 +59,16 @@
 
 pub mod align;
 pub mod box2;
+pub mod cert;
 pub mod groups;
 pub mod heur;
 pub mod island;
 pub mod params;
 pub mod pipeline;
 pub mod place;
+pub mod quality;
 pub mod raster;
+pub mod sqbounds;
 pub mod tiles;
 pub mod poly;
 pub mod rng;
@@ -75,6 +78,7 @@ pub mod tdensity;
 pub mod validate;
 
 pub use box2::{Box2, BoxCorner, TileTarget, TargetBox};
+pub use cert::{CertificateError, PackingCertificate};
 pub use groups::{GroupParams, GroupResult, NumberedGroups};
 pub use island::{Island, IslandFlags, PlacedTransform};
 pub use params::{
@@ -84,8 +88,13 @@ pub use params::{
     TexelDensityUnit, TileFillingMethod, TileTargetMode, UvpmAxis, UvpmFeatureCode, UvpmRetcode,
 };
 pub use pipeline::{pack, PackResult};
+pub use quality::{EqualSquaresReference, QualityReport};
 pub use raster::{find_placement_raster, rasterize_placed};
 pub use rng::SplitMix64;
 pub use similarity::{align_similar, find_similar, is_similar, split_by_similarity};
+pub use sqbounds::{
+    best_known_upper_bound, bound, certified_lower_bound, certified_max_utilization,
+    proven_optimal, SquarePackingBound, BENCHMARK_N,
+};
 pub use tdensity::{set_tdensity, TexelDensityParams, TexelDensityPolicy};
 pub use validate::{validate_islands, ValidationReport};

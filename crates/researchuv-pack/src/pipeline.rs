@@ -76,6 +76,8 @@ pub struct PackResult {
     pub split_offsets: Vec<(i32, i32)>,
     /// Error raised by the split-overlap pass (tile-range InputError).
     pub split_error: Option<String>,
+    /// Packing-quality summary (utilization; certified equal-square gap).
+    pub quality: crate::quality::QualityReport,
 }
 
 /// Compose two `PlacedTransform`s: the result applies `inner` first, then
@@ -637,6 +639,8 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
         validation.retcode
     };
 
+    let quality = crate::quality::quality_report(islands, &placed, params);
+
     PackResult {
         placed,
         non_packed,
@@ -648,6 +652,7 @@ pub fn pack(islands: &mut [Island], params: &PackParams) -> PackResult {
         similarity_clusters,
         split_offsets,
         split_error,
+        quality,
     }
 }
 

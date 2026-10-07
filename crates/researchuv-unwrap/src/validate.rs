@@ -21,6 +21,9 @@ pub enum Severity {
     Error,
     /// The result is usable but the condition deserves attention.
     Warning,
+    /// Context worth surfacing alongside the findings (e.g. packing-quality
+    /// metrics). Never affects `has_errors` / `warnings`.
+    Info,
 }
 
 impl Severity {
@@ -28,6 +31,7 @@ impl Severity {
         match self {
             Severity::Error => "error",
             Severity::Warning => "warning",
+            Severity::Info => "info",
         }
     }
 }
